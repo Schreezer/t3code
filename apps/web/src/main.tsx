@@ -13,6 +13,13 @@ import {
 } from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
 import { clearChunkReloadGuard, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
+import { applyPendingDesktopThreadDeepLink } from "./desktopOpenThread";
+
+// A deep link that opened this window decides where it lands, so drain it
+// before the router reads the location.
+if (isElectron) {
+  await applyPendingDesktopThreadDeepLink();
+}
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();

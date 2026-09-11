@@ -8,7 +8,11 @@ import * as Ref from "effect/Ref";
 
 import * as Electron from "electron";
 
-import { type DesktopSnapShotEvent, DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts";
+import {
+  type DesktopOpenThreadRequest,
+  type DesktopSnapShotEvent,
+  DEFAULT_CLIENT_SETTINGS,
+} from "@t3tools/contracts";
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -19,6 +23,7 @@ import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import {
+  DESKTOP_OPEN_THREAD_CHANNEL,
   MENU_ACTION_CHANNEL,
   QUIT_SHORTCUT_CHANNEL,
   SNAP_SHOT_EVENT_CHANNEL,
@@ -111,6 +116,15 @@ export class DesktopWindow extends Context.Service<
      */
     readonly dispatchSnapShotEvent: (
       event: DesktopSnapShotEvent,
+    ) => Effect.Effect<void, DesktopWindowError>;
+    /**
+     * Push a thread deep link to the renderer, revealing the window (creating
+     * it when the backend is already up) so the thread lands in front of the
+     * user. Silently does nothing when there is nowhere to send it yet;
+     * DesktopDeepLink keeps the link buffered for the renderer to pull.
+     */
+    readonly dispatchOpenThread: (
+      request: DesktopOpenThreadRequest,
     ) => Effect.Effect<void, DesktopWindowError>;
     // Zooms the main window's own webContents. The Electron `zoomIn`/`zoomOut`
     // menu roles act on whichever webContents has keyboard focus, so with an
@@ -972,6 +986,13 @@ export const make = Effect.gen(function* () {
       yield* dispatchRendererEvent(SNAP_SHOT_EVENT_CHANNEL, event, {
         reveal: event.type === "started",
       });
+    }),
+    dispatchOpenThread: Effect.fn("desktop.window.dispatchOpenThread")(function* (request) {
+      yield* Effect.annotateCurrentSpan({
+        environmentId: request.environmentId,
+        threadId: request.threadId,
+      });
+      yield* dispatchRendererEvent(DESKTOP_OPEN_THREAD_CHANNEL, request);
     }),
     zoomMain: Effect.fn("desktop.window.zoomMain")(function* (direction) {
       yield* Effect.annotateCurrentSpan({ direction });

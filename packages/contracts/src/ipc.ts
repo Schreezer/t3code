@@ -85,7 +85,7 @@ import type {
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadStreamItem,
 } from "./orchestrationV2.ts";
-import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { BrowserProfileId } from "./browserProfile.ts";
 import type {
   BrowserImportResult,
@@ -1208,6 +1208,16 @@ export const DesktopPreviewAutomationWaitForInputSchema = Schema.Struct({
 export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
+/**
+ * A `t3code://thread/<environmentId>/<threadId>` deep link the desktop shell
+ * accepted from the OS, already parsed so the renderer never sees the raw URL.
+ */
+export const DesktopOpenThreadRequestSchema = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+});
+export type DesktopOpenThreadRequest = typeof DesktopOpenThreadRequestSchema.Type;
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   /** The desktop client's OS platform, read from Electron's preload process. */
@@ -1319,6 +1329,15 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
+  /**
+   * Thread deep links (`t3code://thread/<environmentId>/<threadId>`) opened
+   * from outside the app. `takePendingOpenThread` drains the link the shell
+   * buffered while the renderer was still starting, which is how a link that
+   * launched the app arrives; `onOpenThread` pushes links that arrive while
+   * the renderer is already running. Optional: older desktop shells lack both.
+   */
+  takePendingOpenThread?: () => Promise<DesktopOpenThreadRequest | null>;
+  onOpenThread?: (listener: (request: DesktopOpenThreadRequest) => void) => () => void;
   /** Present when the desktop shell accepts `t3 app` activation requests. */
   appActivation?: {
     setReady: (ready: boolean) => Promise<void>;
