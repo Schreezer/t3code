@@ -87,4 +87,31 @@ export type BoardMoveResult =
   | { readonly ok: true; readonly from: BoardStageId; readonly to: BoardStageId }
   | { readonly ok: false; readonly reason: string };
 
+/**
+ * A T3 project the daemon can see, from `GET /api/t3/projects`. `appId` is the
+ * t3kan app already registered for it, so the picker can say which projects are
+ * spoken for without a second lookup.
+ */
+export type BoardT3Project = {
+  readonly id: string;
+  readonly title: string;
+  readonly workspaceRoot: string;
+  readonly appId: string | null;
+};
+
+/** Outcome of `POST /api/apps`; a refusal is a 200 with `ok: false`. */
+export type BoardCreateAppResult =
+  | { readonly ok: true; readonly app: BoardApp }
+  | { readonly ok: false; readonly reason: string };
+
+/** Outcome of `POST /api/apps/:id/manager`, which launches a fresh manager thread. */
+export type BoardManagerSessionResult =
+  | {
+      readonly ok: true;
+      readonly threadId: string;
+      readonly environmentId: string;
+      readonly app: BoardApp;
+    }
+  | { readonly ok: false; readonly reason: string };
+
 export const EMPTY_BOARD_STATE: BoardState = { apps: [], cards: [], stages: [] };

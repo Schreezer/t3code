@@ -7,6 +7,7 @@ import type {
   BoardStage,
   BoardStageEnteredBy,
   BoardStageId,
+  BoardT3Project,
   BoardThread,
 } from "./boardTypes";
 
@@ -148,3 +149,55 @@ export const BOARD_STAGE_ACCENT_LABEL: Record<BoardStageEnteredBy, string> = {
   daemon: "Daemon",
   both: "You or manager",
 };
+
+/**
+ * The app id the daemon will mint for a name, mirroring its own slug rule so
+ * the dialog can show the id before the app exists. Kept in lockstep with
+ * `slugify` in the daemon's `setup.ts`.
+ */
+export function boardAppIdPreview(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return slug || "app";
+}
+
+export type BoardProjectChoice = {
+  readonly project: BoardT3Project;
+  /** The app already registered for this project, when the board knows its name. */
+  readonly registeredAs: string | null;
+};
+
+/**
+ * The project list the "Add app" dialog offers: registered projects sink to the
+ * bottom, named by their app so the user can see the board already covers them.
+ */
+export function boardProjectChoices(
+  projects: ReadonlyArray<BoardT3Project>,
+  apps: ReadonlyArray<BoardApp>,
+): ReadonlyArray<BoardProjectChoice> {
+  const choices = projects.map((project) => ({
+    project,
+    registeredAs:
+      project.appId === null
+        ? null
+        : (apps.find((app) => app.id === project.appId)?.name ?? project.appId),
+  }));
+  return [
+    ...choices.filter((choice) => choice.registeredAs === null),
+    ...choices.filter((choice) => choice.registeredAs !== null),
+  ];
+}
+
+/** The in-app route for an app's manager thread, once it has one. */
+export function resolveBoardManagerRoute(
+  app: BoardApp | null,
+): { readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null {
+  if (!app?.managerThreadId || !app.environmentId) return null;
+  return {
+    environmentId: app.environmentId as EnvironmentId,
+    threadId: app.managerThreadId as ThreadId,
+  };
+}

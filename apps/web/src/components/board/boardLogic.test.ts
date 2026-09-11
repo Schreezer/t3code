@@ -2,16 +2,26 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   boardApiUrl,
+  boardAppIdPreview,
+  boardProjectChoices,
   boardSocketUrl,
   newestBoardThread,
   normalizeBoardDaemonUrl,
   resolveBoardDropPreview,
+  resolveBoardManagerRoute,
   resolveBoardStatusChip,
   resolveBoardThreadRoute,
   selectableBoardStages,
   visibleBoardStages,
 } from "./boardLogic";
-import type { BoardApp, BoardCard, BoardStage, BoardThread, BoardThreadState } from "./boardTypes";
+import type {
+  BoardApp,
+  BoardCard,
+  BoardStage,
+  BoardT3Project,
+  BoardThread,
+  BoardThreadState,
+} from "./boardTypes";
 
 function thread(role: string, state: Partial<BoardThreadState> | null): BoardThread {
   return {
@@ -234,5 +244,74 @@ describe("resolveBoardThreadRoute", () => {
     expect(
       resolveBoardThreadRoute(card({ appId: "other", primaryThreadId: "t" }), apps),
     ).toBeNull();
+  });
+});
+
+describe("boardAppIdPreview", () => {
+  it("mirrors the daemon's slug rule", () => {
+    expect(boardAppIdPreview("Forge")).toBe("forge");
+    expect(boardAppIdPreview("  My App v2! ")).toBe("my-app-v2");
+    expect(boardAppIdPreview("t3 code / web")).toBe("t3-code-web");
+  });
+
+  it("falls back to a usable id", () => {
+    expect(boardAppIdPreview("")).toBe("app");
+    expect(boardAppIdPreview("!!!")).toBe("app");
+  });
+
+  it("caps the id the way the daemon does", () => {
+    expect(boardAppIdPreview("a".repeat(60))).toBe("a".repeat(40));
+  });
+});
+
+describe("boardProjectChoices", () => {
+  const projects: ReadonlyArray<BoardT3Project> = [
+    { id: "p1", title: "Forge", workspaceRoot: "/src/forge", appId: "forge" },
+    { id: "p2", title: "Anvil", workspaceRoot: "/src/anvil", appId: null },
+    { id: "p3", title: "Ingot", workspaceRoot: "/src/ingot", appId: "ingot" },
+  ];
+  const apps: ReadonlyArray<BoardApp> = [
+    {
+      id: "forge",
+      name: "Forge",
+      projectId: "p1",
+      managerThreadId: "manager-thread",
+      webBaseUrl: null,
+      environmentId: "env",
+    },
+  ];
+
+  it("floats unregistered projects and names the app of the rest", () => {
+    expect(
+      boardProjectChoices(projects, apps).map((choice) => [choice.project.id, choice.registeredAs]),
+    ).toEqual([
+      ["p2", null],
+      ["p1", "Forge"],
+      ["p3", "ingot"],
+    ]);
+  });
+});
+
+describe("resolveBoardManagerRoute", () => {
+  const app: BoardApp = {
+    id: "forge",
+    name: "Forge",
+    projectId: "p1",
+    managerThreadId: "manager-thread",
+    webBaseUrl: null,
+    environmentId: "5b31be85-e516-4dc9-8b70-1223aa16f143",
+  };
+
+  it("routes to the app's manager thread", () => {
+    expect(resolveBoardManagerRoute(app)).toEqual({
+      environmentId: "5b31be85-e516-4dc9-8b70-1223aa16f143",
+      threadId: "manager-thread",
+    });
+  });
+
+  it("is null before the app has a manager or an environment", () => {
+    expect(resolveBoardManagerRoute({ ...app, managerThreadId: null })).toBeNull();
+    expect(resolveBoardManagerRoute({ ...app, environmentId: null })).toBeNull();
+    expect(resolveBoardManagerRoute(null)).toBeNull();
   });
 });

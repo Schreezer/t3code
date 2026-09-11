@@ -3,9 +3,13 @@ import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } fro
 import { boardApiUrl, boardSocketUrl } from "./boardLogic";
 import {
   EMPTY_BOARD_STATE,
+  type BoardApp,
   type BoardCardDetail,
+  type BoardCreateAppResult,
+  type BoardManagerSessionResult,
   type BoardMoveResult,
   type BoardState,
+  type BoardT3Project,
 } from "./boardTypes";
 
 export type BoardConnectionPhase = "connecting" | "live" | "offline";
@@ -48,6 +52,14 @@ export type BoardDaemon = {
     stage: string;
   }) => Promise<number>;
   readonly loadCard: (cardId: number) => Promise<BoardCardDetail>;
+  /** Every T3 project the daemon can see, for the "Add app" picker. */
+  readonly loadT3Projects: () => Promise<ReadonlyArray<BoardT3Project>>;
+  readonly createApp: (input: {
+    projectId: string;
+    name?: string;
+  }) => Promise<BoardCreateAppResult>;
+  /** Launches a fresh manager thread for the app, settling the previous one. */
+  readonly createManagerSession: (appId: string) => Promise<BoardManagerSessionResult>;
 };
 
 /**
@@ -224,6 +236,52 @@ export function useBoardDaemon(input: {
     [baseUrl],
   );
 
+  const loadT3Projects = useCallback(async (): Promise<ReadonlyArray<BoardT3Project>> => {
+    const response = await fetch(boardApiUrl(baseUrl, "api/t3/projects"));
+    const body = await readJson(response);
+    if (!response.ok) throw new Error(errorMessage(body, response));
+    return (Array.isArray(body.projects) ? body.projects : []) as ReadonlyArray<BoardT3Project>;
+  }, [baseUrl]);
+
+  const createApp = useCallback(
+    async (input: { projectId: string; name?: string }): Promise<BoardCreateAppResult> => {
+      const response = await fetch(boardApiUrl(baseUrl, "api/apps"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      const body = await readJson(response);
+      if (!response.ok) throw new Error(errorMessage(body, response));
+      if (body.ok !== true) {
+        return { ok: false, reason: typeof body.reason === "string" ? body.reason : "refused" };
+      }
+      return { ok: true, app: body.app as BoardApp };
+    },
+    [baseUrl],
+  );
+
+  const createManagerSession = useCallback(
+    async (appId: string): Promise<BoardManagerSessionResult> => {
+      const response = await fetch(boardApiUrl(baseUrl, `api/apps/${appId}/manager`), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const body = await readJson(response);
+      if (!response.ok) throw new Error(errorMessage(body, response));
+      if (body.ok !== true) {
+        return { ok: false, reason: typeof body.reason === "string" ? body.reason : "refused" };
+      }
+      return {
+        ok: true,
+        threadId: String(body.threadId),
+        environmentId: String(body.environmentId),
+        app: body.app as BoardApp,
+      };
+    },
+    [baseUrl],
+  );
+
   return {
     state,
     phase,
@@ -233,5 +291,8 @@ export function useBoardDaemon(input: {
     moveCard,
     createCard,
     loadCard,
+    loadT3Projects,
+    createApp,
+    createManagerSession,
   };
 }

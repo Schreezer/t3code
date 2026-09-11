@@ -1,3 +1,4 @@
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useMemo, useState, type DragEvent } from "react";
@@ -10,24 +11,40 @@ import { Button } from "../ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../ui/empty";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 import { SidebarInset } from "../ui/sidebar";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
+import { BoardAddAppDialog } from "./BoardAddAppDialog";
 import {
   BOARD_STAGE_ACCENT_LABEL,
   boardStageAccentClassName,
   normalizeBoardDaemonUrl,
   resolveBoardDropPreview,
+  resolveBoardManagerRoute,
   resolveBoardStatusChip,
   resolveBoardThreadRoute,
   visibleBoardStages,
   type BoardChipTone,
 } from "./boardLogic";
 import { BoardCardDrawer } from "./BoardCardDrawer";
-import type { BoardCard, BoardStage, BoardStageId } from "./boardTypes";
+import { BoardManagerControl } from "./BoardManagerControl";
+import type { BoardApp, BoardCard, BoardStage, BoardStageId } from "./boardTypes";
 import { useBoardDaemon, type BoardConnectionPhase } from "./useBoardDaemon";
+
+/**
+ * Sentinel value for the app selector's "Add app…" row. App ids are slugs, so
+ * no real app can collide with it.
+ */
+const ADD_APP_VALUE = "__add_app__";
 
 const CARD_TYPES = ["bug", "feature", "tweak", "idea"] as const;
 const NEW_CARD_STAGES = ["discussing", "planned", "later"] as const;
@@ -269,9 +286,11 @@ export function BoardView() {
   const [hoveredStage, setHoveredStage] = useState<BoardStageId | null>(null);
   const [newCardOpen, setNewCardOpen] = useState(false);
   const [drawerCardId, setDrawerCardId] = useState<number | null>(null);
+  const [addAppOpen, setAddAppOpen] = useState(false);
+  const [managerPendingAppId, setManagerPendingAppId] = useState<string | null>(null);
 
   const board = useBoardDaemon({ baseUrl: daemonUrl, appId, showDropped });
-  const { state, moveCard, createCard } = board;
+  const { state, moveCard, createCard, createApp, createManagerSession } = board;
 
   const draggedCard = state.cards.find((card) => card.id === draggedCardId) ?? null;
   const stages = useMemo(
@@ -279,6 +298,7 @@ export function BoardView() {
     [showDropped, state.stages],
   );
   const effectiveAppId = appId ?? (state.apps.length === 1 ? state.apps[0]!.id : null);
+  const selectedApp = state.apps.find((app) => app.id === effectiveAppId) ?? null;
 
   const performMove = useCallback(
     async (cardId: number, to: BoardStageId) => {
@@ -344,7 +364,99 @@ export function BoardView() {
     [createCard, effectiveAppId],
   );
 
+  const handleCreateApp = useCallback(
+    async (input: { projectId: string; name: string }) => {
+      try {
+        const result = await createApp({
+          projectId: input.projectId,
+          ...(input.name.length > 0 ? { name: input.name } : {}),
+        });
+        if (!result.ok) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Could not add the app",
+              description: result.reason,
+            }),
+          );
+          return false;
+        }
+        setAppId(result.app.id);
+        toastManager.add(
+          stackedThreadToast({
+            type: "success",
+            title: "App added",
+            description: `${result.app.name} (${result.app.id})`,
+          }),
+        );
+        return true;
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not add the app",
+            description: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        return false;
+      }
+    },
+    [createApp],
+  );
+
+  const openManagerThread = useCallback(
+    (app: BoardApp) => {
+      const target = resolveBoardManagerRoute(app);
+      if (target === null) return;
+      void navigate({ to: "/$environmentId/$threadId", params: target });
+    },
+    [navigate],
+  );
+
+  /**
+   * Launching a manager takes the daemon a few seconds — it settles the old
+   * thread and starts a real turn in the project — so the control stays pending
+   * until the new thread is ours to open.
+   */
+  const startManagerSession = useCallback(
+    async (app: BoardApp) => {
+      setManagerPendingAppId(app.id);
+      try {
+        const result = await createManagerSession(app.id);
+        if (!result.ok) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Could not start the manager",
+              description: result.reason,
+            }),
+          );
+          return;
+        }
+        void navigate({
+          to: "/$environmentId/$threadId",
+          params: {
+            environmentId: result.environmentId as EnvironmentId,
+            threadId: result.threadId as ThreadId,
+          },
+        });
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not start the manager",
+            description: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      } finally {
+        setManagerPendingAppId(null);
+      }
+    },
+    [createManagerSession, navigate],
+  );
+
   const unreachable = board.phase !== "live" && board.unreachableReason !== null;
+  const noApps = !unreachable && state.stages.length > 0 && state.apps.length === 0;
 
   return (
     <SidebarInset className="isolate h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
@@ -354,7 +466,14 @@ export function BoardView() {
             <h1 className="shrink-0 text-sm font-medium">Board</h1>
             <Select
               value={appId ?? ""}
-              onValueChange={(value) => setAppId(String(value) === "" ? null : String(value))}
+              onValueChange={(value) => {
+                const next = String(value);
+                if (next === ADD_APP_VALUE) {
+                  setAddAppOpen(true);
+                  return;
+                }
+                setAppId(next === "" ? null : next);
+              }}
             >
               <SelectTrigger size="sm" className="w-40 min-w-0" aria-label="Board app">
                 <SelectValue placeholder="All apps">
@@ -368,8 +487,18 @@ export function BoardView() {
                     {app.name}
                   </SelectItem>
                 ))}
+                <SelectSeparator />
+                <SelectItem value={ADD_APP_VALUE}>Add app…</SelectItem>
               </SelectPopup>
             </Select>
+            {selectedApp !== null ? (
+              <BoardManagerControl
+                app={selectedApp}
+                pending={managerPendingAppId === selectedApp.id}
+                onOpen={() => openManagerThread(selectedApp)}
+                onNewSession={() => void startManagerSession(selectedApp)}
+              />
+            ) : null}
             <div className="ms-auto flex items-center gap-3">
               <Label className="gap-2 text-xs font-normal text-muted-foreground">
                 <Switch
@@ -417,6 +546,20 @@ export function BoardView() {
             <Button size="sm" variant="outline" onClick={board.refresh}>
               <RefreshCwIcon />
               Try again
+            </Button>
+          </Empty>
+        ) : noApps ? (
+          <Empty>
+            <EmptyHeader>
+              <EmptyTitle>No apps on this board yet</EmptyTitle>
+              <EmptyDescription>
+                Register a T3 project so the daemon can track its cards and run a manager thread for
+                it.
+              </EmptyDescription>
+            </EmptyHeader>
+            <Button size="sm" onClick={() => setAddAppOpen(true)}>
+              <PlusIcon />
+              Add app
             </Button>
           </Empty>
         ) : (
@@ -485,6 +628,14 @@ export function BoardView() {
           </div>
         )}
       </div>
+
+      <BoardAddAppDialog
+        open={addAppOpen}
+        apps={state.apps}
+        loadProjects={board.loadT3Projects}
+        onCreate={handleCreateApp}
+        onOpenChange={setAddAppOpen}
+      />
 
       <BoardCardDrawer
         cardId={drawerCardId}
