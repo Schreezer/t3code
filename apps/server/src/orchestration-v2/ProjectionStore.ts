@@ -56,6 +56,12 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import {
+  isThreadHistoryUserTurn,
+  isThreadHistoryTurnStart,
+  THREAD_HISTORY_MAX_RAW_TURNS,
+} from "./threadHistoryPaging.ts";
+
 export class ProjectionStoreApplyEventError extends Schema.TaggedError<ProjectionStoreApplyEventError>()(
   "ProjectionStoreApplyEventError",
   {
@@ -139,6 +145,7 @@ export type ProjectionSettlementCandidate = Pick<
   | "latestRunCompletedAt"
   | "latestUserMessageAt"
   | "status"
+  | "activityRunStartedAt"
   | "activityRunStatus"
   | "pendingRuntimeRequest"
   | "pendingBackgroundTasks"
@@ -295,7 +302,10 @@ export interface ProjectionStoreV2Shape {
   readonly getThreadSnapshotWindow: (
     threadId: ThreadId,
     options: {
+      /** Row fallback for histories without turn starts. */
       readonly rowLimit: number;
+      /** User-turn window, with extra anchors for the inclusive cursor and has-more check. */
+      readonly userTurnLimit?: number | undefined;
       readonly anchorItemId?: TurnItemId | undefined;
       readonly anchorThreadId?: ThreadId | undefined;
       readonly requiredRunId?: RunId | undefined;
@@ -702,6 +712,7 @@ type ShellThreadRow = {
   readonly latest_run_completed_at: string | null;
   readonly active_run_id: string | null;
   readonly activity_run_status: string | null;
+  readonly activity_run_started_at: string | null;
   readonly last_error: string | null;
   readonly pending_request_payload_json: string | null;
   readonly latest_user_message_at: string | null;
@@ -733,6 +744,8 @@ type ShellRunItemCountRow = {
   readonly run_id: string;
   readonly item_count: number;
 };
+
+const encodeIdList = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 
 const encodeThreadPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJsonSchema),
@@ -1155,6 +1168,7 @@ export function threadShellFromProjection(
     latestRunCompletedAt: latestRun?.completedAt ?? null,
     activeRunId: activeRun?.id ?? null,
     activityRunStatus: activityRun?.status ?? null,
+    activityRunStartedAt: activityRun?.startedAt ?? activityRun?.requestedAt ?? null,
     status: latestRun?.status ?? "idle",
     lastError: providerSession?.lastError ?? null,
     pendingRuntimeRequest:
@@ -1244,6 +1258,7 @@ type ShellThreadState = {
   readonly latestRunCompletedAt: DateTime.Utc | null;
   readonly activeRunId: RunId | null;
   readonly activityRunStatus: ShellActivityRunStatus | null;
+  readonly activityRunStartedAt: DateTime.Utc | null;
   readonly lastError: string | null;
   readonly pendingRuntimeRequest: OrchestrationV2ThreadProjection["runtimeRequests"][number] | null;
   readonly latestUserMessageAt: DateTime.Utc | null;
@@ -1377,6 +1392,7 @@ function shellFromState(input: {
     latestRunCompletedAt: input.state.latestRunCompletedAt,
     activeRunId: input.state.activeRunId,
     activityRunStatus: input.state.activityRunStatus,
+    activityRunStartedAt: input.state.activityRunStartedAt,
     status: input.state.latestRunStatus,
     lastError: input.state.lastError,
     pendingRuntimeRequest:
@@ -2292,6 +2308,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       threadId: ThreadId,
       window?: {
         readonly rowLimit: number;
+        readonly userTurnLimit?: number | undefined;
         readonly anchorItemId?: TurnItemId | undefined;
         readonly requiredRunId?: RunId | undefined;
         readonly suppressLocal?: boolean | undefined;
@@ -2318,7 +2335,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ORDER BY ordinal ASC, turn_item_id ASC
               `
             : yield* sql<PayloadRow>`
-                WITH eligible AS (
+                WITH eligible AS NOT MATERIALIZED (
                   SELECT item.payload_json, item.ordinal, item.turn_item_id,
                     item.run_id, item.node_id, item.type
                   FROM orchestration_v2_projection_turn_items AS item
@@ -2382,11 +2399,38 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                           AND request.type = 'run_interrupt_request'
                       )
                     )
+                ), turn_anchors AS (
+                  SELECT ordinal, payload_json
+                  FROM eligible
+                  WHERE type = 'user_message'
+                    AND json_extract(payload_json, '$.inputIntent') IN ('turn_start', 'queued_turn')
+                    AND ${window.userTurnLimit ?? null} IS NOT NULL
+                  ORDER BY ordinal DESC
+                  LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS + 2}
+                ), user_anchors AS (
+                  SELECT ordinal
+                  FROM turn_anchors
+                  WHERE json_extract(payload_json, '$.createdBy') = 'user'
+                  ORDER BY ordinal DESC
+                  LIMIT ${(window.userTurnLimit ?? 0) + 2}
+                ), boundary AS (
+                  SELECT CASE
+                    WHEN COUNT(*) >= ${(window.userTurnLimit ?? 0) + 2} THEN MIN(ordinal)
+                    WHEN (SELECT COUNT(*) FROM turn_anchors) >= ${THREAD_HISTORY_MAX_RAW_TURNS + 2}
+                      THEN (SELECT MIN(ordinal) FROM turn_anchors)
+                    ELSE 0
+                  END AS ordinal, (SELECT COUNT(*) FROM turn_anchors) AS anchors
+                  FROM user_anchors
                 ), selected AS (
                   SELECT payload_json, ordinal, turn_item_id, run_id, type
                   FROM eligible
+                  WHERE ordinal >= (SELECT ordinal FROM boundary)
                   ORDER BY ordinal DESC, turn_item_id DESC
-                  LIMIT ${window.rowLimit}
+                  LIMIT CASE
+                    WHEN ${window.rowLimit} = 0 THEN 0
+                    WHEN (SELECT anchors FROM boundary) > 0 THEN -1
+                    ELSE ${window.rowLimit}
+                  END
                 ), retained AS (
                   SELECT payload_json, ordinal, turn_item_id FROM selected
                   UNION
@@ -2424,7 +2468,47 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }),
           );
         const cohortRunIds = cohortJson("runId");
-        const cohortNodeIds = cohortJson("nodeId");
+        // A run can contain thousands of completed nodes. Load the visible
+        // nodes and live control dependencies, then walk only their ancestors.
+        const cohortNodeIds =
+          window === undefined
+            ? cohortJson("nodeId")
+            : encodeIdList(
+                (yield* sql<{ readonly node_id: string }>`
+            WITH RECURSIVE retained(node_id) AS (
+              SELECT value FROM json_each(${cohortJson("nodeId")})
+              UNION
+              SELECT node_id FROM orchestration_v2_projection_nodes
+              WHERE thread_id = ${threadId} AND status IN ('pending','starting','running','waiting')
+              UNION
+              SELECT root_node_id FROM orchestration_v2_projection_run_attempts
+              WHERE thread_id = ${threadId} AND (
+                status IN ('pending','starting','running','waiting')
+                OR run_id IN (SELECT value FROM json_each(${cohortRunIds}))
+                OR run_id = ${window.requiredRunId ?? null})
+              UNION
+              SELECT json_extract(payload_json, '$.rootNodeId') FROM orchestration_v2_projection_runs
+              WHERE thread_id = ${threadId} AND (
+                status IN ('queued','preparing','starting','running','waiting')
+                OR run_id IN (SELECT value FROM json_each(${cohortRunIds}))
+                OR run_id = ${window.requiredRunId ?? null})
+              UNION
+              SELECT node_id FROM orchestration_v2_projection_runtime_requests
+              WHERE thread_id = ${threadId} AND status IN ('pending','waiting')
+              UNION
+              SELECT parent_node_id FROM orchestration_v2_projection_subagents
+              WHERE thread_id = ${threadId} AND status IN ('pending','starting','running','waiting')
+              UNION
+              SELECT node_id FROM orchestration_v2_projection_provider_turns
+              WHERE thread_id = ${threadId} AND status IN ('starting','running','waiting')
+              UNION
+              SELECT parent.parent_node_id FROM orchestration_v2_projection_nodes AS parent
+              INNER JOIN retained ON parent.node_id = retained.node_id
+              WHERE parent.thread_id = ${threadId} AND parent.parent_node_id IS NOT NULL
+            )
+            SELECT node_id FROM retained WHERE node_id IS NOT NULL
+          `).map((row) => row.node_id),
+              );
         const cohortProviderThreadIds = cohortJson("providerThreadId");
         const cohortProviderTurnIds = cohortJson("providerTurnId");
         const cohortMessageIds = cohortJson("messageId");
@@ -2490,9 +2574,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             : sql<PayloadRow>`
             SELECT payload_json FROM orchestration_v2_projection_nodes
             WHERE thread_id = ${threadId}
-              AND (status IN ('pending','starting','running','waiting')
-                OR run_id IN (SELECT value FROM json_each(${cohortRunIds}))
-                OR node_id IN (SELECT value FROM json_each(${cohortNodeIds})))
+              AND node_id IN (SELECT value FROM json_each(${cohortNodeIds}))
             ORDER BY COALESCE(started_at, ''), node_id ASC
           `,
           window === undefined
@@ -2758,6 +2840,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       seenThreadIds: ReadonlySet<ThreadId>,
       window?: {
         readonly rowLimit: number;
+        readonly userTurnLimit?: number | undefined;
         readonly anchorItemId?: TurnItemId | undefined;
         readonly requiredRunId?: RunId | undefined;
         readonly suppressLocal?: boolean | undefined;
@@ -2775,6 +2858,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         const projection = yield* readCanonicalProjection(threadId, localWindow);
         const forkedFrom = projection.thread.forkedFrom;
         if (forkedFrom?.type !== "run" || seenThreadIds.has(forkedFrom.threadId)) {
+          return withLocalVisibleTurnItems(projection);
+        }
+
+        // A row-limited segment without turn anchors must finish paging locally
+        // before inherited user turns can influence the page boundary.
+        if (
+          window?.userTurnLimit !== undefined &&
+          localWindow !== undefined &&
+          localWindow.rowLimit > 0 &&
+          projection.turnItems.length >= localWindow.rowLimit &&
+          !projection.turnItems.some(isThreadHistoryTurnStart)
+        ) {
           return withLocalVisibleTurnItems(projection);
         }
 
@@ -2853,6 +2948,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   historyAnchor.threadId !== forkedFrom.threadId;
                 return {
                   rowLimit: window.rowLimit,
+                  userTurnLimit: window.userTurnLimit,
                   requiredRunId: forkedFrom.runId,
                   suppressLocal: anchor === undefined || anchorIsInDescendant,
                   ...(anchor === undefined || anchorIsInDescendant
@@ -3775,6 +3871,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   };
             const projection = yield* readProjection(threadId, new Set(), {
               rowLimit: options.rowLimit,
+              userTurnLimit: options.userTurnLimit,
               ...(historyAnchor?.threadId === threadId
                 ? { anchorItemId: historyAnchor.itemId }
                 : {}),
@@ -3863,6 +3960,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ORDER BY r.ordinal DESC, r.run_id DESC
                 LIMIT 1
               ) AS activity_run_status,
+              (
+                SELECT COALESCE(json_extract(r.payload_json, '$.startedAt'), r.requested_at)
+                FROM orchestration_v2_projection_runs r
+                WHERE r.thread_id = t.thread_id
+                  AND r.status IN ('preparing', 'starting', 'running', 'waiting')
+                ORDER BY r.ordinal DESC, r.run_id DESC
+                LIMIT 1
+              ) AS activity_run_started_at,
               (
                 SELECT json_extract(session.payload_json, '$.lastError')
                 FROM orchestration_v2_projection_provider_sessions session
@@ -4123,6 +4228,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       ? null
                       : DateTime.makeUnsafe(row.latest_user_message_at),
                   activityRunStatus: null,
+                  activityRunStartedAt: null,
                   pendingRuntimeRequest: null,
                   pendingBackgroundTasks: derivePendingBackgroundWork({
                     latestRun:
@@ -4202,6 +4308,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ? null
               : DateTime.makeUnsafe(row.latest_run_completed_at),
           activeRunId: row.active_run_id === null ? null : RunId.make(row.active_run_id),
+          activityRunStartedAt:
+            row.activity_run_started_at === null
+              ? null
+              : DateTime.makeUnsafe(row.activity_run_started_at),
           activityRunStatus:
             row.activity_run_status === "preparing" ||
             row.activity_run_status === "starting" ||
@@ -4729,10 +4839,25 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 : snapshot.projection.visibleTurnItems.findIndex(
                     (row) => row.sourceItemId === options.anchorItemId,
                   ) + 1;
-            const visibleTurnItems = snapshot.projection.visibleTurnItems.slice(
-              Math.max(0, anchorIndex - options.rowLimit),
-              anchorIndex,
+            const candidates = snapshot.projection.visibleTurnItems.slice(0, anchorIndex);
+            const turnAnchors =
+              options.userTurnLimit === undefined
+                ? []
+                : candidates.flatMap((row, index) =>
+                    isThreadHistoryTurnStart(row.item) ? [index] : [],
+                  );
+            const rawStart = turnAnchors.at(-(THREAD_HISTORY_MAX_RAW_TURNS + 2)) ?? 0;
+            const anchors = turnAnchors.filter(
+              (index) => index >= rawStart && isThreadHistoryUserTurn(candidates[index]!.item),
             );
+            const anchorLimit = (options.userTurnLimit ?? 0) + 2;
+            const start =
+              turnAnchors.length > 0
+                ? anchors.length < anchorLimit
+                  ? rawStart
+                  : anchors.at(-anchorLimit)!
+                : Math.max(0, anchorIndex - options.rowLimit);
+            const visibleTurnItems = candidates.slice(start);
             return {
               ...snapshot,
               projection: { ...snapshot.projection, visibleTurnItems },

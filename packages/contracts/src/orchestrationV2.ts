@@ -1440,6 +1440,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   activeRunId: Schema.NullOr(RunId),
+  /** Start of the activity-owning run; request time while it is preparing. */
+  activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   activityRunStatus: Schema.optional(
     Schema.NullOr(Schema.Literals(["preparing", "starting", "running", "waiting"])),
   ),
@@ -2712,7 +2714,7 @@ export const OrchestrationV2ThreadBoundedSnapshot = Schema.Struct({
    * has no local rows (inherited-only).
    */
   latestLocalTurnOrdinal: Schema.NullOr(NonNegativeInt),
-  /** True only when required live control state alone exceeds the transport budget. */
+  /** True when complete turns or required live control state exceed the usual byte budget. */
   payloadBudgetExceeded: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2ThreadBoundedSnapshot = typeof OrchestrationV2ThreadBoundedSnapshot.Type;
