@@ -275,6 +275,13 @@ export const LoadBalancingWeights = Schema.Record(
 
 export const DiffColorScheme = Schema.Literals(["red-green", "blue-orange"]);
 
+/**
+ * Base URL of the t3kan daemon that owns the kanban board's cards and stages.
+ * The board view is a client of that daemon; it runs beside T3 Code rather
+ * than inside it, so the address is a client preference, not server state.
+ */
+export const DEFAULT_BOARD_DAEMON_URL = "http://127.0.0.1:4131";
+
 export const ClientSettingsSchema = Schema.Struct({
   diffColorScheme: DiffColorScheme.pipe(
     Schema.withDecodingDefault(Effect.succeed("red-green" as const)),
@@ -456,6 +463,9 @@ export const ClientSettingsSchema = Schema.Struct({
   snapShotFlash: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   snapShotAnimations: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   wordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  boardDaemonUrl: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_BOARD_DAEMON_URL)),
+  ),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
 
@@ -1479,5 +1489,6 @@ export const ClientSettingsPatch = Schema.Struct({
   snapShotFlash: Schema.optionalKey(Schema.Boolean),
   snapShotAnimations: Schema.optionalKey(Schema.Boolean),
   wordWrap: Schema.optionalKey(Schema.Boolean),
+  boardDaemonUrl: Schema.optionalKey(Schema.String),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

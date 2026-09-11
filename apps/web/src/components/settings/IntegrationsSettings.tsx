@@ -109,6 +109,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { BoardSettings } from "./BoardSettings";
 import { searchableSetting } from "./settingsSearch";
 import { BrowserImportWizard, type WizardTarget } from "./BrowserImportWizard";
 import type { ImportOutcome } from "./browserImportWizard.logic";
@@ -1352,6 +1353,7 @@ export function IntegrationsSettingsPanel() {
           previewDefaults
         )}
       </SettingsSection>
+      <BoardSettings />
       <DeviceIntegrationSettings />
     </SettingsPageContainer>
   );
