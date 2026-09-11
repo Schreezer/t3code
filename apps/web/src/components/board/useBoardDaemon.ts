@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
-import { boardApiUrl, boardSocketUrl } from "./boardLogic";
+import { boardApiUrl, boardSocketUrl, type BoardCreateAppInput } from "./boardLogic";
 import {
   EMPTY_BOARD_STATE,
   type BoardApp,
@@ -54,10 +54,7 @@ export type BoardDaemon = {
   readonly loadCard: (cardId: number) => Promise<BoardCardDetail>;
   /** Every T3 project the daemon can see, for the "Add app" picker. */
   readonly loadT3Projects: () => Promise<ReadonlyArray<BoardT3Project>>;
-  readonly createApp: (input: {
-    projectId: string;
-    name?: string;
-  }) => Promise<BoardCreateAppResult>;
+  readonly createApp: (input: BoardCreateAppInput) => Promise<BoardCreateAppResult>;
   /** Launches a fresh manager thread for the app, settling the previous one. */
   readonly createManagerSession: (appId: string) => Promise<BoardManagerSessionResult>;
 };
@@ -244,7 +241,7 @@ export function useBoardDaemon(input: {
   }, [baseUrl]);
 
   const createApp = useCallback(
-    async (input: { projectId: string; name?: string }): Promise<BoardCreateAppResult> => {
+    async (input: BoardCreateAppInput): Promise<BoardCreateAppResult> => {
       const response = await fetch(boardApiUrl(baseUrl, "api/apps"), {
         method: "POST",
         headers: { "content-type": "application/json" },

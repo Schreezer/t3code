@@ -34,6 +34,7 @@ import {
   resolveBoardThreadRoute,
   visibleBoardStages,
   type BoardChipTone,
+  type BoardCreateAppInput,
 } from "./boardLogic";
 import { BoardCardDrawer } from "./BoardCardDrawer";
 import { BoardManagerControl } from "./BoardManagerControl";
@@ -365,12 +366,9 @@ export function BoardView() {
   );
 
   const handleCreateApp = useCallback(
-    async (input: { projectId: string; name: string }) => {
+    async (input: BoardCreateAppInput) => {
       try {
-        const result = await createApp({
-          projectId: input.projectId,
-          ...(input.name.length > 0 ? { name: input.name } : {}),
-        });
+        const result = await createApp(input);
         if (!result.ok) {
           toastManager.add(
             stackedThreadToast({

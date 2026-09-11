@@ -3,6 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   boardApiUrl,
   boardAppIdPreview,
+  boardAppNameFromFolder,
+  boardCreateAppPayload,
   boardProjectChoices,
   boardSocketUrl,
   newestBoardThread,
@@ -313,5 +315,58 @@ describe("resolveBoardManagerRoute", () => {
     expect(resolveBoardManagerRoute({ ...app, managerThreadId: null })).toBeNull();
     expect(resolveBoardManagerRoute({ ...app, environmentId: null })).toBeNull();
     expect(resolveBoardManagerRoute(null)).toBeNull();
+  });
+});
+
+describe("boardAppNameFromFolder", () => {
+  it("names the app after the folder", () => {
+    expect(boardAppNameFromFolder("/src/forge")).toBe("forge");
+    expect(boardAppNameFromFolder("~/code/my-app/")).toBe("my-app");
+    expect(boardAppNameFromFolder("  /src/forge  ")).toBe("forge");
+    expect(boardAppNameFromFolder("C:\\code\\anvil")).toBe("anvil");
+  });
+
+  it("prefills nothing when the path names no folder yet", () => {
+    expect(boardAppNameFromFolder("")).toBe("");
+    expect(boardAppNameFromFolder("/")).toBe("");
+    expect(boardAppNameFromFolder("~")).toBe("");
+    expect(boardAppNameFromFolder("~/")).toBe("");
+  });
+});
+
+describe("boardCreateAppPayload", () => {
+  const selectedProject = { id: "p2", workspaceRoot: "/src/anvil" };
+
+  it("has nothing to submit without a folder", () => {
+    expect(
+      boardCreateAppPayload({ folder: "  ", name: "Anvil", selectedProject: null }),
+    ).toBeNull();
+  });
+
+  it("sends a typed folder as a workspace root", () => {
+    expect(
+      boardCreateAppPayload({ folder: "  ~/code/anvil ", name: " Anvil ", selectedProject: null }),
+    ).toEqual({ workspaceRoot: "~/code/anvil", name: "Anvil" });
+  });
+
+  it("omits a blank name so the daemon picks one", () => {
+    expect(
+      boardCreateAppPayload({ folder: "/src/anvil", name: "   ", selectedProject: null }),
+    ).toEqual({ workspaceRoot: "/src/anvil" });
+  });
+
+  it("sends the project id for an untouched quick pick", () => {
+    expect(boardCreateAppPayload({ folder: "/src/anvil", name: "Anvil", selectedProject })).toEqual(
+      {
+        projectId: "p2",
+        name: "Anvil",
+      },
+    );
+  });
+
+  it("falls back to the workspace root once the picked path is edited", () => {
+    expect(
+      boardCreateAppPayload({ folder: "/src/anvil/web", name: "Web", selectedProject }),
+    ).toEqual({ workspaceRoot: "/src/anvil/web", name: "Web" });
   });
 });

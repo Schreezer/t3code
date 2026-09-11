@@ -1,7 +1,9 @@
-import { RefreshCwIcon } from "lucide-react";
+import { FolderOpenIcon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
+import { ensureLocalApi } from "../../localApi";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -15,25 +17,37 @@ import {
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Spinner } from "../ui/spinner";
-import { boardAppIdPreview, boardProjectChoices } from "./boardLogic";
+import {
+  boardAppIdPreview,
+  boardAppNameFromFolder,
+  boardCreateAppPayload,
+  boardProjectChoices,
+  type BoardCreateAppInput,
+} from "./boardLogic";
 import type { BoardApp, BoardT3Project } from "./boardTypes";
 
 /**
- * Registers a T3 project as a t3kan app. The daemon owns the whole job —
- * slugging the id, finding the environment, writing the manager contract into
- * the workspace — so this only has to name a project and a display name.
+ * Registers a folder as a t3kan app. The daemon owns the whole job — slugging
+ * the id, reusing or creating the T3 project rooted at the folder, writing the
+ * manager contract into it — so this only has to name a folder and a display
+ * name. The project list is a quick pick for folders T3 already knows.
  */
 export function BoardAddAppDialog(props: {
   readonly open: boolean;
   readonly apps: ReadonlyArray<BoardApp>;
   readonly loadProjects: () => Promise<ReadonlyArray<BoardT3Project>>;
   /** Resolves true once the app exists; the dialog then closes. */
-  readonly onCreate: (input: { projectId: string; name: string }) => Promise<boolean>;
+  readonly onCreate: (input: BoardCreateAppInput) => Promise<boolean>;
   readonly onOpenChange: (open: boolean) => void;
 }) {
   const { open, loadProjects } = props;
-  const [projectId, setProjectId] = useState<string | null>(null);
+  const [folder, setFolder] = useState("");
+  const [project, setProject] = useState<BoardT3Project | null>(null);
   const [name, setName] = useState("");
+  // Once the name is typed in it stops following the folder, so a hand-written
+  // name survives the rest of the path being typed.
+  const [nameEdited, setNameEdited] = useState(false);
+  const [picking, setPicking] = useState(false);
   const [pending, setPending] = useState(false);
   const [attempt, setAttempt] = useState(0);
   // Tagged with the attempt it answers, so a retry's result never loses to the
@@ -75,22 +89,60 @@ export function BoardAddAppDialog(props: {
   const choices = boardProjectChoices(projects ?? [], props.apps);
   const allRegistered =
     choices.length > 0 && choices.every((choice) => choice.registeredAs !== null);
+  const payload = boardCreateAppPayload({ folder, name, selectedProject: project });
 
-  // Closing forgets the choice, so a stale project can never be submitted the
+  /** A folder the user typed or browsed to is no longer a project quick pick. */
+  const enterFolder = (next: string) => {
+    setFolder(next);
+    setProject(null);
+    if (!nameEdited) setName(boardAppNameFromFolder(next));
+  };
+
+  const pickProject = (next: BoardT3Project) => {
+    setFolder(next.workspaceRoot);
+    setProject(next);
+    setName(next.title);
+    setNameEdited(false);
+  };
+
+  const browse = async () => {
+    setPicking(true);
+    try {
+      const trimmed = folder.trim();
+      const picked = await ensureLocalApi().dialogs.pickFolder(
+        trimmed.length > 0 ? { initialPath: trimmed } : undefined,
+      );
+      if (picked) enterFolder(picked);
+    } catch {
+      // Leave the dialog as it was; the user can type the path instead.
+    } finally {
+      setPicking(false);
+    }
+  };
+
+  // Closing forgets the choice, so a stale folder can never be submitted the
   // next time the dialog opens.
   const close = () => {
-    setProjectId(null);
+    setFolder("");
+    setProject(null);
     setName("");
+    setNameEdited(false);
     setPending(false);
     props.onOpenChange(false);
   };
 
   const submit = async () => {
-    if (projectId === null || pending) return;
+    if (payload === null || pending) return;
     setPending(true);
-    const created = await props.onCreate({ projectId, name: name.trim() });
+    const created = await props.onCreate(payload);
     if (created) close();
     else setPending(false);
+  };
+
+  const submitOnEnter = (event: { key: string; preventDefault: () => void }) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void submit();
   };
 
   return (
@@ -105,13 +157,46 @@ export function BoardAddAppDialog(props: {
         <DialogHeader>
           <DialogTitle>Add app</DialogTitle>
           <DialogDescription>
-            Register a T3 project with the board. The daemon writes the manager contract into the
-            project's workspace.
+            Register a folder with the board. The daemon writes the manager contract into it, and
+            creates a T3 project for it when there is not one already.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium text-muted-foreground">Project</span>
+            <Label htmlFor="board-add-app-folder" className="text-xs text-muted-foreground">
+              Folder
+            </Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="board-add-app-folder"
+                size="sm"
+                className="font-mono"
+                placeholder="~/code/my-app"
+                value={folder}
+                onChange={(event) => enterFolder(event.target.value)}
+                onKeyDown={submitOnEnter}
+              />
+              {isElectron ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={picking}
+                  onClick={() => void browse()}
+                >
+                  {picking ? <Spinner className="size-4" /> : <FolderOpenIcon />}
+                  Browse…
+                </Button>
+              ) : null}
+            </div>
+            <span className="text-[11px] text-muted-foreground">
+              An absolute path on the daemon's machine. `~` is allowed.
+            </span>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">
+              Or pick an existing project
+            </span>
             {loadError !== null ? (
               <div className="flex flex-col items-start gap-2 rounded-lg border p-3">
                 <p className="text-sm text-destructive-foreground">{loadError}</p>
@@ -134,26 +219,23 @@ export function BoardAddAppDialog(props: {
                 This daemon does not see any T3 projects.
               </p>
             ) : (
-              <ul className="flex max-h-64 flex-col gap-1 overflow-y-auto">
-                {choices.map(({ project, registeredAs }) => (
-                  <li key={project.id}>
+              <ul className="flex max-h-52 flex-col gap-1 overflow-y-auto">
+                {choices.map(({ project: choice, registeredAs }) => (
+                  <li key={choice.id}>
                     <button
                       type="button"
                       disabled={registeredAs !== null}
-                      aria-pressed={projectId === project.id}
-                      onClick={() => {
-                        setProjectId(project.id);
-                        setName(project.title);
-                      }}
+                      aria-pressed={project?.id === choice.id}
+                      onClick={() => pickProject(choice)}
                       className={cn(
                         "flex w-full cursor-pointer flex-col items-start gap-0.5 rounded-lg border p-2.5 text-left outline-hidden hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-ring",
-                        projectId === project.id && "border-primary bg-accent/40",
+                        project?.id === choice.id && "border-primary bg-accent/40",
                         registeredAs !== null &&
                           "cursor-not-allowed opacity-64 hover:bg-transparent",
                       )}
                     >
                       <span className="flex w-full items-center gap-2 text-[13px] font-medium text-foreground">
-                        <span className="truncate">{project.title}</span>
+                        <span className="truncate">{choice.title}</span>
                         {registeredAs !== null ? (
                           <span className="ms-auto shrink-0 text-[11px] font-normal text-muted-foreground">
                             registered as {registeredAs}
@@ -161,7 +243,7 @@ export function BoardAddAppDialog(props: {
                         ) : null}
                       </span>
                       <span className="w-full truncate font-mono text-[11px] text-muted-foreground">
-                        {project.workspaceRoot}
+                        {choice.workspaceRoot}
                       </span>
                     </button>
                   </li>
@@ -184,14 +266,11 @@ export function BoardAddAppDialog(props: {
               size="sm"
               placeholder="App name"
               value={name}
-              disabled={projectId === null}
-              onChange={(event) => setName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void submit();
-                }
+              onChange={(event) => {
+                setNameEdited(true);
+                setName(event.target.value);
               }}
+              onKeyDown={submitOnEnter}
             />
             <span className="font-mono text-[11px] text-muted-foreground">
               id: {boardAppIdPreview(name)}
@@ -202,7 +281,7 @@ export function BoardAddAppDialog(props: {
           <Button size="sm" variant="outline" onClick={close}>
             Cancel
           </Button>
-          <Button size="sm" disabled={projectId === null || pending} onClick={() => void submit()}>
+          <Button size="sm" disabled={payload === null || pending} onClick={() => void submit()}>
             {pending ? <Spinner className="size-4" /> : null}
             Create
           </Button>

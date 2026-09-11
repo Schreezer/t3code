@@ -201,3 +201,44 @@ export function resolveBoardManagerRoute(
     threadId: app.managerThreadId as ThreadId,
   };
 }
+
+/**
+ * The display name to prefill from a folder path: its last segment. A path that
+ * names no folder yet — blank, a bare root, a bare `~` — prefills nothing, so
+ * the daemon names the app itself.
+ */
+export function boardAppNameFromFolder(folder: string): string {
+  const last = folder
+    .trim()
+    .replace(/\\/g, "/")
+    .split("/")
+    .findLast((segment) => segment.length > 0 && segment !== ".");
+  return last === undefined || last === "~" ? "" : last;
+}
+
+/** The body of `POST /api/apps`: an existing T3 project, or any folder. */
+export type BoardCreateAppInput =
+  | { readonly projectId: string; readonly name?: string }
+  | { readonly workspaceRoot: string; readonly name?: string };
+
+/**
+ * What the "Add app" dialog should post. A quick pick from the project list
+ * sends that project's id; anything else — a typed or browsed folder, or a pick
+ * whose path was edited afterwards — goes as a workspace root, which the daemon
+ * resolves to the project already rooted there or creates a new one for.
+ * Null means there is nothing to submit yet.
+ */
+export function boardCreateAppPayload(input: {
+  readonly folder: string;
+  readonly name: string;
+  readonly selectedProject: { readonly id: string; readonly workspaceRoot: string } | null;
+}): BoardCreateAppInput | null {
+  const folder = input.folder.trim();
+  if (folder.length === 0) return null;
+  const name = input.name.trim();
+  const named = name.length > 0 ? { name } : {};
+  const project = input.selectedProject;
+  return project !== null && project.workspaceRoot.trim() === folder
+    ? { projectId: project.id, ...named }
+    : { workspaceRoot: folder, ...named };
+}
