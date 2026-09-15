@@ -289,7 +289,11 @@ const make = Effect.gen(function* () {
         yield* setupTracker.stageStatus(threadId, "fetch", startFromOrigin ? "running" : "skipped");
         if (startFromOrigin) {
           yield* git
-            .fetchRemote({ cwd: project.workspaceRoot, remoteName: "origin" })
+            .fetchRemote({
+              cwd: project.workspaceRoot,
+              remoteName: "origin",
+              refName: input.workspaceStrategy.baseRef,
+            })
             .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
           const remoteBaseExists = yield* git
             .remoteBranchExists({
@@ -437,6 +441,7 @@ const make = Effect.gen(function* () {
         })
         .pipe(Effect.mapError(mapError(input, "run-setup-script", threadId)));
 
+      let awaitAsyncSetup = Effect.void;
       if (setup.status === "started") {
         setupTerminalId = setup.terminalId;
         yield* setupTracker.update(threadId, (snapshot) => ({
@@ -448,20 +453,37 @@ const make = Effect.gen(function* () {
           },
         }));
         if (setup.completion) {
-          const completion = yield* setup.completion;
-          if (completion.exitCode !== 0)
-            return yield* mapError(
-              input,
-              "run-setup-script",
-              threadId,
-            )(`Setup script exited with ${completion.exitCode ?? "no exit code"}.`);
+          const awaitCompletion = Effect.gen(function* () {
+            const completion = yield* setup.completion!;
+            yield* setupTracker.stage(threadId, "setup-script", {
+              status: completion.exitCode === 0 ? "done" : "failed",
+              detail: `exited with ${completion.exitCode ?? "no exit code"}`,
+            });
+            if (completion.exitCode !== 0 && !setup.async)
+              return yield* mapError(
+                input,
+                "run-setup-script",
+                threadId,
+              )(`Setup script exited with ${completion.exitCode ?? "no exit code"}.`);
+          });
+          if (setup.async) {
+            awaitAsyncSetup = awaitCompletion.pipe(
+              Effect.catchCause((cause) =>
+                setupTracker.stage(threadId, "setup-script", {
+                  status: "failed",
+                  detail: failureDetail(Cause.squash(cause)),
+                }),
+              ),
+            );
+          } else {
+            yield* awaitCompletion;
+          }
+        } else {
+          yield* setupTracker.stageStatus(threadId, "setup-script", "done");
         }
+      } else {
+        yield* setupTracker.stageStatus(threadId, "setup-script", "skipped");
       }
-      yield* setupTracker.stageStatus(
-        threadId,
-        "setup-script",
-        setup.status === "started" ? "done" : "skipped",
-      );
       yield* setupTracker.markUncancellable(threadId);
       yield* setupTracker.stageStatus(threadId, "agent", "running");
       if (runId !== null) {
@@ -475,6 +497,7 @@ const make = Effect.gen(function* () {
           .pipe(Effect.mapError(mapError(input, "release-run", threadId)));
       }
       yield* setupTracker.stageStatus(threadId, "agent", "done");
+      yield* awaitAsyncSetup;
       yield* setupTracker.finish(threadId, "done");
     }).pipe(
       Effect.onError((cause) =>
@@ -608,11 +631,39 @@ const make = Effect.gen(function* () {
 
       const launchReceipt = yield* readReceipt(input, input.commandId);
       return yield* Effect.gen(function* () {
+        // A retried launch has no client-supplied id to replay against, so
+        // recover the thread id its accepted create was recorded under before
+        // allocating another one; a fresh id would only collide with the
+        // recorded receipt.
+        const reusableLaunchReceipt =
+          input.threadId === undefined &&
+          Option.isSome(launchReceipt) &&
+          launchReceipt.value.status === "accepted" &&
+          launchReceipt.value.commandType === "thread.create"
+            ? launchReceipt.value
+            : undefined;
         const candidateThreadId =
           input.threadId ??
+          reusableLaunchReceipt?.threadId ??
           (yield* ids.allocate
             .thread({ projectId: input.projectId })
             .pipe(Effect.mapError(mapError(input, "create-thread"))));
+
+        if (reusableLaunchReceipt !== undefined) {
+          const shell = yield* threads
+            .getThreadShell(candidateThreadId)
+            .pipe(Effect.mapError(mapError(input, "create-thread", candidateThreadId)));
+          if (shell === null) {
+            return yield* mapError(input, "create-thread", candidateThreadId)("Thread not found.");
+          }
+          if (shell.projectId !== input.projectId) {
+            return yield* mapError(
+              input,
+              "resolve-project",
+              candidateThreadId,
+            )("Project identity changed.");
+          }
+        }
 
         if (input.reuseExistingThread === true && Option.isNone(launchReceipt)) {
           yield* validateReusableThread(input, candidateThreadId);

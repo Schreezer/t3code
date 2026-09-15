@@ -24,6 +24,7 @@ import {
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -59,6 +60,7 @@ import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
 
 const projectId = ProjectId.make("project:launch-test");
+const otherProjectId = ProjectId.make("project:launch-other");
 const encodeThreadProjection = Schema.encodeEffect(OrchestrationV2ThreadProjectionJson);
 const modelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
@@ -76,6 +78,12 @@ const project = {
   createdAt: "2026-06-20T00:00:00.000Z",
   updatedAt: "2026-06-20T00:00:00.000Z",
   deletedAt: null,
+} as const;
+
+const otherProject = {
+  ...project,
+  id: otherProjectId,
+  title: "Other",
 } as const;
 
 const adapter = {
@@ -136,7 +144,14 @@ function makeHarness(options: HarnessOptions = {}) {
       bootstrap: () => Effect.die("unused"),
       update: () => Effect.die("unused"),
       delete: () => Effect.die("unused"),
-      getById: (id) => Effect.succeed(id === projectId ? Option.some(project) : Option.none()),
+      getById: (id) =>
+        Effect.succeed(
+          id === projectId
+            ? Option.some(project)
+            : id === otherProjectId
+              ? Option.some(otherProject)
+              : Option.none(),
+        ),
       getByWorkspaceRoot: () => Effect.succeed(Option.some(project)),
       snapshot: Effect.die("unused"),
     }),
@@ -465,6 +480,7 @@ it.effect("enqueues provider work only after setup has been initiated", () =>
           Effect.andThen(Deferred.await(allowSetup)),
           Effect.as({
             status: "started" as const,
+            async: false,
             scriptId: "setup",
             scriptName: "Setup",
             scriptCommand: "vp install",
@@ -757,7 +773,7 @@ it.effect("arms durable title generation after accepting the first message", () 
       const generated = yield* threads.getThreadProjection(launched.threadId);
       assert.equal(generated.thread.title, "Generated title");
       assert.deepEqual(
-        harness.generateThreadTitle.mock.calls[0]?.[0].modelSelection,
+        harness.generateThreadTitle.mock.calls[0]?.[0]?.modelSelection,
         DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
       );
 
@@ -779,7 +795,10 @@ it.effect("arms durable title generation after accepting the first message", () 
       });
       const regenerated = yield* threads.getThreadProjection(launched.threadId);
       assert.equal(regenerated.thread.title, "Regenerated title");
-      assert.equal(harness.generateThreadTitle.mock.calls[1]?.[0].previousTitle, "Generated title");
+      assert.equal(
+        harness.generateThreadTitle.mock.calls[1]?.[0]?.previousTitle,
+        "Generated title",
+      );
 
       yield* threads.dispatch({
         type: "thread.metadata.update",
@@ -893,9 +912,9 @@ it.effect("generates an initial title for an attachment-only message", () =>
         kind: { type: "initial", messageId },
       });
 
-      assert.equal(harness.generateThreadTitle.mock.calls[0]?.[0].message, "");
+      assert.equal(harness.generateThreadTitle.mock.calls[0]?.[0]?.message, "");
       assert.equal(
-        harness.generateThreadTitle.mock.calls[0]?.[0].attachments?.[0]?.name,
+        harness.generateThreadTitle.mock.calls[0]?.[0]?.attachments?.[0]?.name,
         "screenshot.png",
       );
     }).pipe(Effect.provide(harness.layer));
@@ -949,7 +968,7 @@ it.effect("uses the available source control writer for generated worktree branc
       );
       yield* waitUntil(() => Effect.sync(() => harness.generateBranchName.mock.calls.length === 1));
       assert.deepEqual(
-        harness.generateBranchName.mock.calls[0]?.[0].modelSelection,
+        harness.generateBranchName.mock.calls[0]?.[0]?.modelSelection,
         writerModelSelection,
       );
     }).pipe(Effect.provide(harness.layer));
@@ -987,7 +1006,7 @@ it.effect("falls back when the source control writer is unavailable", () =>
       );
       yield* waitUntil(() => Effect.sync(() => harness.generateBranchName.mock.calls.length === 1));
       assert.deepEqual(
-        harness.generateBranchName.mock.calls[0]?.[0].modelSelection,
+        harness.generateBranchName.mock.calls[0]?.[0]?.modelSelection,
         DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
       );
     }).pipe(Effect.provide(harness.layer));
@@ -1010,7 +1029,7 @@ it.effect("names the worktree itself when the client provides no branch", () =>
       );
       yield* waitUntil(() => Effect.sync(() => harness.createWorktree.mock.calls.length === 1));
       assert.match(
-        harness.createWorktree.mock.calls[0]?.[0].newRefName ?? "",
+        harness.createWorktree.mock.calls[0]?.[0]?.newRefName ?? "",
         /^t3code\/[0-9a-f]{8}$/u,
       );
       yield* waitUntil(() =>
@@ -1049,7 +1068,7 @@ it.effect("renames a temporary t3code/<hash> branch off the provisioning critica
         }),
       );
       yield* Deferred.await(branchNameStarted);
-      assert.equal(harness.createWorktree.mock.calls[0]?.[0].newRefName, "t3code/abcd1234");
+      assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3code/abcd1234");
       yield* waitUntil(() =>
         threads
           .getThreadProjection(launched.threadId)
@@ -1089,7 +1108,7 @@ it.effect("keeps an explicit branch name instead of generating one", () =>
       );
       yield* waitUntil(() => Effect.sync(() => harness.createWorktree.mock.calls.length === 1));
       assert.equal(harness.generateBranchName.mock.calls.length, 0);
-      assert.equal(harness.createWorktree.mock.calls[0]?.[0].newRefName, "my-feature");
+      assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "my-feature");
     }).pipe(Effect.provide(harness.layer));
   }),
 );
@@ -1115,7 +1134,7 @@ it.effect("keeps the temporary branch when branch generation fails", () =>
         }),
       );
       yield* waitUntil(() => Effect.sync(() => harness.generateBranchName.mock.calls.length === 1));
-      assert.equal(harness.createWorktree.mock.calls[0]?.[0].newRefName, "t3code/abcd1234");
+      assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3code/abcd1234");
       yield* waitUntil(() =>
         threads
           .getThreadProjection(launched.threadId)
@@ -1252,6 +1271,225 @@ for (const failurePoint of ["worktree", "setup"] as const) {
       }),
   );
 }
+
+it.effect("replays a server-allocated launch", () =>
+  Effect.gen(function* () {
+    const setupEntered = yield* Deferred.make<void>();
+    const allowSetup = yield* Deferred.make<void>();
+    const harness = makeHarness({
+      runSetup: () =>
+        Deferred.succeed(setupEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(allowSetup)),
+          Effect.as({ status: "no-script" as const }),
+        ),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const { threadId: _unusedThreadId, ...rest } = launchInput({
+        command: "command:launch:allocated-retry",
+        thread: "unused",
+        message: "Only once",
+      });
+      const first = yield* launches.launch(rest);
+      yield* Deferred.await(setupEntered);
+      const retry = yield* launches.launch(rest);
+      assert.equal(first.threadId, retry.threadId);
+      assert.isFalse(first.resumed);
+      assert.isTrue(retry.resumed);
+      assert.equal(harness.runSetup.mock.calls.length, 1);
+      assert.equal(retry.projection.messages.length, 1);
+      assert.equal(retry.projection.runs.length, 1);
+      assert.equal(retry.projection.messages[0]?.id, first.projection.messages[0]?.id);
+      assert.equal(retry.projection.runs[0]?.id, first.projection.runs[0]?.id);
+      yield* Deferred.succeed(allowSetup, undefined);
+      yield* threads.streamStoredEventsFrom({ threadId: first.threadId }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.commandId === CommandId.make(`${rest.commandId}:release`) &&
+            stored.event.type === "run.updated",
+        ),
+        Stream.runHead,
+      );
+      const settled = yield* launches.launch(rest);
+      assert.equal(settled.threadId, first.threadId);
+      assert.isTrue(settled.resumed);
+      assert.equal(settled.projection.messages[0]?.id, first.projection.messages[0]?.id);
+      assert.equal(settled.projection.runs[0]?.id, first.projection.runs[0]?.id);
+      assert.equal(harness.runSetup.mock.calls.length, 1);
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect("rejects a server-allocated launch replay with a mismatching thread id", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const { threadId: _unusedThreadId, ...rest } = launchInput({
+      command: "command:launch:allocated-mismatch",
+      thread: "unused",
+      message: "Mismatch",
+    });
+    const first = yield* launches.launch(rest);
+    const failed = yield* launches
+      .launch({
+        ...rest,
+        threadId: ThreadId.make("thread:launch:allocated-mismatch"),
+      })
+      .pipe(Effect.flip);
+    assert.notEqual(first.threadId, ThreadId.make("thread:launch:allocated-mismatch"));
+    assert.equal(failed._tag, "ThreadLaunchError");
+    assert.equal(failed.operation, "create-thread");
+    assert.include(String(failed.cause), "cannot be replayed");
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("rejects a server-allocated launch receipt from another project", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const { threadId: _unusedThreadId, ...rest } = launchInput({
+      command: "command:launch:allocated-wrong-project",
+      thread: "unused",
+      message: "Wrong project",
+    });
+    const first = yield* launches.launch(rest);
+    const failed = yield* launches
+      .launch({
+        ...rest,
+        projectId: otherProjectId,
+      })
+      .pipe(Effect.flip);
+    assert.equal(failed._tag, "ThreadLaunchError");
+    assert.equal(failed.operation, "resolve-project");
+    assert.equal(failed.threadId, first.threadId);
+    assert.equal(failed.cause, "Project identity changed.");
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("rejects a server-allocated launch retry after the thread is deleted", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const { threadId: _unusedThreadId, ...rest } = launchInput({
+      command: "command:launch:allocated-deleted",
+      thread: "unused",
+      message: "Deleted before retry",
+    });
+    const first = yield* launches.launch(rest);
+    yield* threads.dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("command:launch:allocated-deleted:delete"),
+      threadId: first.threadId,
+    });
+    const failed = yield* launches.launch(rest).pipe(Effect.flip);
+    assert.equal(failed._tag, "ThreadLaunchError");
+    assert.equal(failed.operation, "create-thread");
+    assert.equal(failed.threadId, first.threadId);
+    assert.equal(failed.cause, "Thread not found.");
+    const shells = yield* threads.listProjectThreads({ projectId, includeSubagents: true });
+    assert.equal(shells.length, 0);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("does not treat an unrelated accepted command receipt as a launch", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const threadId = ThreadId.make("thread:launch:unrelated-receipt");
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:launch:unrelated-receipt:create"),
+      threadId,
+      projectId,
+      title: "Existing",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* threads.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("command:launch:unrelated-receipt"),
+      threadId,
+      expectedEmpty: true,
+    });
+    const { threadId: _unusedThreadId, ...rest } = launchInput({
+      command: "command:launch:unrelated-receipt",
+      thread: "unused",
+      message: "Should not become a launch",
+    });
+    const failed = yield* launches.launch(rest).pipe(Effect.flip);
+    assert.equal(failed._tag, "ThreadLaunchError");
+    assert.equal(failed.operation, "create-thread");
+    assert.include(String(failed.cause), "cannot be replayed");
+    const projection = yield* threads.getThreadProjection(threadId);
+    assert.equal(projection.messages.length, 0);
+    assert.equal(projection.runs.length, 0);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("bounds concurrent first launches to one thread per command", () =>
+  Effect.gen(function* () {
+    const setupEntered = yield* Deferred.make<void>();
+    const allowSetup = yield* Deferred.make<void>();
+    const harness = makeHarness({
+      runSetup: () =>
+        Deferred.succeed(setupEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(allowSetup)),
+          Effect.as({ status: "no-script" as const }),
+        ),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const { threadId: _unusedThreadId, ...rest } = launchInput({
+        command: "command:launch:concurrent-allocated",
+        thread: "unused",
+        message: "Race me",
+      });
+      // The command receipt is reserved atomically with the winning create, so
+      // a loser either replays the winner's stored events or surfaces a
+      // transient replay conflict that the next attempt resolves — the race
+      // can never persist a second thread.
+      const results = yield* Effect.all(
+        [launches.launch(rest).pipe(Effect.exit), launches.launch(rest).pipe(Effect.exit)],
+        { concurrency: "unbounded" },
+      );
+      const winner = results.find(Exit.isSuccess);
+      assert.isDefined(winner);
+      const threadId = winner!.value.threadId;
+      for (const result of results) {
+        if (Exit.isSuccess(result)) {
+          assert.equal(result.value.threadId, threadId);
+          continue;
+        }
+        const error = Cause.findErrorOption(result.cause).pipe(Option.getOrThrow);
+        assert.equal(error._tag, "ThreadLaunchError");
+        assert.equal(error.operation, "create-thread");
+        assert.include(String(error.cause), "cannot be replayed");
+        const retried = yield* launches.launch(rest);
+        assert.equal(retried.threadId, threadId);
+      }
+      const projectThreads = yield* threads.listProjectThreads({
+        projectId,
+        includeSubagents: false,
+      });
+      assert.equal(projectThreads.length, 1);
+      const projection = yield* threads.getThreadProjection(threadId);
+      assert.equal(projection.messages.length, 1);
+      assert.equal(projection.runs.length, 1);
+      yield* Deferred.await(setupEntered);
+      assert.equal(harness.runSetup.mock.calls.length, 1);
+      yield* Deferred.succeed(allowSetup, undefined);
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
 
 it.effect("deduplicates retried launch side effects in-process", () =>
   Effect.gen(function* () {
@@ -1704,3 +1942,62 @@ it.effect("cancels tracked setup before provider work is released", () =>
     }).pipe(Effect.provide(harness.layer));
   }),
 );
+
+for (const exitCode of [0, 1]) {
+  it.effect(`releases an async setup before its completion with exit ${exitCode}`, () =>
+    Effect.gen(function* () {
+      const completion = yield* Deferred.make<{ exitCode: number | null; durationMs: number }>();
+      const harness = makeHarness({
+        runSetup: () =>
+          Effect.succeed({
+            status: "started" as const,
+            async: true,
+            scriptId: "setup",
+            scriptName: "Setup",
+            scriptCommand: "vp install",
+            terminalId: "setup",
+            cwd: "/repo-worktrees/feature",
+            completion: Deferred.await(completion),
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+        const launched = yield* launches.launch(
+          launchInput({
+            command: `command:launch:async-${exitCode}`,
+            thread: `thread:launch:async-${exitCode}`,
+            message: "Start during setup",
+            workspace: { type: "worktree", baseRef: "main" },
+          }),
+        );
+        yield* tracker.stream(launched.threadId).pipe(
+          Stream.filter(
+            (snapshot) =>
+              snapshot?.stages.some((stage) => stage.id === "agent" && stage.status === "done") ===
+              true,
+          ),
+          Stream.runHead,
+        );
+        const running = yield* threads.getThreadProjection(launched.threadId);
+        assert.equal(running.runs[0]?.status, "starting");
+        assert.equal((yield* tracker.get(launched.threadId))?.phase, "running");
+        yield* Deferred.succeed(completion, { exitCode, durationMs: 1 });
+        yield* tracker.stream(launched.threadId).pipe(
+          Stream.filter((snapshot) => snapshot?.phase === "done"),
+          Stream.runHead,
+        );
+        const settled = yield* tracker.get(launched.threadId);
+        assert.equal(
+          settled?.stages.find((stage) => stage.id === "setup-script")?.status,
+          exitCode === 0 ? "done" : "failed",
+        );
+        assert.equal(
+          (yield* threads.getThreadProjection(launched.threadId)).runs[0]?.status,
+          "starting",
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+}

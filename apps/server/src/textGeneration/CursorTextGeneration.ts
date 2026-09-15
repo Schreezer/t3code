@@ -34,12 +34,12 @@ type CursorTextGenerationOperation =
   | "generateBranchName"
   | "generateThreadTitle";
 
-function emptyCursorSdkResultDetail(result: RunResult): string {
+function cursorSdkResultDetail(result: RunResult): string {
   switch (result.status) {
     case "cancelled":
       return "Cursor SDK request was cancelled.";
     case "error":
-      return "Cursor SDK request finished with an error and no output.";
+      return "Cursor SDK request finished with an error.";
     case "finished":
       return "Cursor SDK returned empty output.";
   }
@@ -160,10 +160,10 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       );
 
       const rawResult = promptResult.result?.trim() ?? "";
-      if (!rawResult) {
+      if (promptResult.status !== "finished" || !rawResult) {
         return yield* new TextGenerationError({
           operation,
-          detail: emptyCursorSdkResultDetail(promptResult),
+          detail: cursorSdkResultDetail(promptResult),
         });
       }
 
@@ -268,6 +268,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       const { prompt, outputSchema } = buildThreadTitlePrompt({
         message: input.message,
         previousTitle: input.previousTitle,
+        linkedContext: input.linkedContext,
         attachments: input.attachments,
       });
 
@@ -280,6 +281,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
 
       return {
         title: sanitizeThreadTitle(generated.title),
+        ...(generated.needsRefinement ? { needsRefinement: true } : {}),
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
