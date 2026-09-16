@@ -1,4 +1,6 @@
+import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import {
   deriveThreadRelationshipGraph,
   immediateThreadRelationships,
@@ -18,7 +20,6 @@ import {
   BotIcon,
   CornerLeftUpIcon,
   GitForkIcon,
-  GitMergeIcon,
   LoaderCircleIcon,
   MoreHorizontalIcon,
   PlusIcon,
@@ -117,7 +118,7 @@ function relationshipThreadTitle(input: {
   readonly isSubagent: boolean;
 }): string {
   if (!input.isSubagent) return input.title;
-  return input.title.replace(/^Subagent:\s*/i, "");
+  return formatSubagentDisplayTitle(input.title);
 }
 
 export function ThreadRelationshipsPanel(props: {
@@ -328,7 +329,7 @@ export function ThreadRelationshipsPanel(props: {
                           {busyAction === "merge" ? (
                             <LoaderCircleIcon className="size-3 animate-spin" />
                           ) : (
-                            <GitMergeIcon className="size-3" />
+                            <PullRequestGlyph.merged className="size-3" />
                           )}
                         </Button>
                       }

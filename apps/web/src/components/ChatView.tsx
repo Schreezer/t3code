@@ -159,6 +159,8 @@ import { type LegendListRef } from "@legendapp/list/react";
 import {
   CHAT_TIMELINE_ANCHOR_OFFSET,
   timelineContentOverflowsViewport,
+  observeTimelineRun,
+  type TimelineRunObservation,
   type TimelineScrollMode,
 } from "./chat/timelineScrollAnchoring";
 import {
@@ -401,7 +403,11 @@ import {
   shouldShowThreadErrorBanner,
   ThreadErrorBanner,
 } from "./chat/ThreadErrorBanner";
-import { QueuedRunsControl, type EditQueuedRunRequest } from "./chat/QueuedRunsControl";
+import {
+  QueuedRunsControl,
+  type QueuedRunsControlHandle,
+  type EditQueuedRunRequest,
+} from "./chat/QueuedRunsControl";
 import { useLinkedThreadPullRequest } from "./ThreadStatusIndicators";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { ComposerSurface } from "./chat/ComposerSurface";
@@ -420,7 +426,7 @@ import {
   MOBILE_DRAFT_HEADLINE_VIEW_TRANSITION_NAME,
   runMobileComposerTransition,
 } from "./chat/draftHeroTransition";
-import type { ComposerDispatchMode } from "./chat/composerDispatch";
+import type { ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   agentControlledBrowserCloseConfirmation,
@@ -3729,7 +3735,9 @@ export default function ChatView(props: ChatViewProps) {
     live: liveWorktreeSetup,
     recorded: null,
     turnStarted: activeThread?.latestRun?.startedAt != null,
-    isWorking,
+    // Counts the optimistic send too, so the row retires the moment the
+    // follow-up is on screen rather than when the server echoes it back.
+    followUpSent: timelineMessages.filter((message) => message.role === "user").length > 1,
   });
   // Sends wait for the agent handoff, not for the setup script: an async
   // script keeps the snapshot running while the agent already works, and a
@@ -4199,6 +4207,7 @@ export default function ChatView(props: ChatViewProps) {
   const editQueuedRunCommand = useAtomCommand(threadEnvironment.editQueuedRun, {
     reportFailure: false,
   });
+  const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
   const queuedEditSaveInFlightRef = useRef(false);
   const [isSavingQueuedEdit, setIsSavingQueuedEdit] = useState(false);
   const queuedEditImageResources = useMemo(
@@ -5658,13 +5667,7 @@ export default function ChatView(props: ChatViewProps) {
   const positionedTimelineAnchorRef = useRef<MessageId | null>(null);
   const settledTimelineAnchorRef = useRef<MessageId | null>(null);
   const activeTimelineAnchorIndexRef = useRef<number | null>(null);
-  const observedTimelineActivityRef = useRef<{
-    readonly threadKey: string | null;
-    readonly runId: RunId | null;
-  }>({
-    threadKey: activeThreadKey,
-    runId: activeActivityRun?.runId ?? null,
-  });
+  const observedTimelineActivityRef = useRef<TimelineRunObservation | null>(null);
   const anchorUserScrollGenerationRef = useRef(0);
   const liveFollowUserScrollGenerationRef = useRef<number | null>(0);
   const pendingAnchorScrollRestoreRef = useRef<{
@@ -5721,31 +5724,26 @@ export default function ChatView(props: ChatViewProps) {
       cancelTimelineLiveFollowForUserNavigation;
   }, [cancelTimelineLiveFollowForUserNavigation]);
   useEffect(() => {
-    const observed = observedTimelineActivityRef.current;
-    if (observed.threadKey !== activeThreadKey) {
-      observedTimelineActivityRef.current = {
-        threadKey: activeThreadKey,
-        runId: activeActivityRun?.runId ?? null,
-      };
-      return;
-    }
-    if (
-      activeActivityRun === null ||
-      activeActivityRun.status === "queued" ||
-      observed.runId === activeActivityRun.runId
-    ) {
-      return;
-    }
-    const dispatchedUserItem = serverProjection?.visibleTurnItems.find(
-      (row) => row.item.type === "user_message" && row.item.runId === activeActivityRun.runId,
-    );
-    if (dispatchedUserItem?.item.type !== "user_message") {
-      return;
-    }
-    observedTimelineActivityRef.current = {
+    const previous = observedTimelineActivityRef.current;
+    const dispatchedUserItem =
+      previous?.hydrated &&
+      previous.threadKey === activeThreadKey &&
+      activeActivityRun !== null &&
+      previous.runId !== activeActivityRun.runId
+        ? serverProjection?.visibleTurnItems.find(
+            (row) => row.item.type === "user_message" && row.item.runId === activeActivityRun.runId,
+          )
+        : undefined;
+    const { observation, anchorMessageId: messageId } = observeTimelineRun(previous, {
       threadKey: activeThreadKey,
-      runId: activeActivityRun.runId,
-    };
+      hydrated: !isServerThread || (serverProjection !== null && threadStatus === "live"),
+      runId: activeActivityRun?.runId ?? null,
+      queued: activeActivityRun?.status === "queued",
+      messageId:
+        dispatchedUserItem?.item.type === "user_message" ? dispatchedUserItem.item.messageId : null,
+    });
+    observedTimelineActivityRef.current = observation;
+    if (messageId === null) return;
     if (
       pendingTimelineAnchorRef.current !== null ||
       timelineScrollModeRef.current === "free-scrolling"
@@ -5753,7 +5751,6 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
-    const messageId = dispatchedUserItem.item.messageId;
     isAtEndRef.current = true;
     timelineScrollModeRef.current = "anchoring-new-turn";
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
@@ -5762,7 +5759,7 @@ export default function ChatView(props: ChatViewProps) {
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
     setTimelineAnchor({ threadKey: activeThreadKey, messageId });
-  }, [activeActivityRun, activeThreadKey, serverProjection]);
+  }, [activeActivityRun, activeThreadKey, isServerThread, serverProjection, threadStatus]);
   const timelineRealContentOverflowsViewport = useCallback(
     (list?: LegendListRef | null) =>
       timelineContentOverflowsViewport((list ?? legendListRef.current)?.getState(), {
@@ -5823,6 +5820,21 @@ export default function ChatView(props: ChatViewProps) {
       void legendListRef.current?.scrollToEnd?.({ animated });
     });
   }, []);
+  const displayedTimelineKeyRef = useRef(displayedTimeline.displayThreadKey);
+  useLayoutEffect(() => {
+    const displayKey = displayedTimeline.displayThreadKey;
+    if (displayKey === null || displayKey !== activeThreadKey) {
+      displayedTimelineKeyRef.current = displayKey;
+      return;
+    }
+    if (displayedTimelineKeyRef.current === displayKey) {
+      return;
+    }
+    displayedTimelineKeyRef.current = displayKey;
+    // Keep the list mounted across jumps; pin the newly displayed thread to
+    // its end the way a remount used to via initialScrollAtEnd.
+    scrollToEnd();
+  }, [activeThreadKey, displayedTimeline.displayThreadKey, scrollToEnd]);
   useEffect(() => {
     let removeListeners: (() => void) | null = null;
     let frame: number | null = null;
@@ -6134,8 +6146,8 @@ export default function ChatView(props: ChatViewProps) {
     activeTimelineAnchorIndexRef.current = null;
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
-    // activeThreadRef resets transitively with the active thread.
-  }, [activeThread?.id]);
+    // Environment identity is part of the scroll session too.
+  }, [activeThreadKey]);
 
   useEffect(() => {
     if (!activeThread?.id || terminalUiState.terminalOpen) return;
@@ -6620,31 +6632,24 @@ export default function ChatView(props: ChatViewProps) {
   // and the informational parked-thread banner last — it must never cover another.
   // Background work (subagent fleets, workflow runs, watch loops) can outlive
   // the turn; once it settles, the composer stop button is gone, so this
-  // banner is the only visible stop affordance. Stop routes through the
-  // turn interrupt, which stops the thread's background tasks too.
+  // banner is the only visible stop affordance. The interrupt path also
+  // accepts a completed run while its provider still has background work.
   const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
-  const [isStoppingBackgroundWork, setIsStoppingBackgroundWork] = useState(false);
-  useEffect(() => {
-    // "Stopping..." holds until the tasks clear; the interrupt command
-    // returning only means the request was accepted.
-    if (activeBackgroundTasks.length === 0) {
-      setIsStoppingBackgroundWork(false);
-    }
-  }, [activeBackgroundTasks.length]);
-  useEffect(() => {
-    // Per-thread state: switching threads while A's stop is pending must not
-    // disable B's Stop button.
-    setIsStoppingBackgroundWork(false);
-  }, [activeThreadId]);
+  const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
+  const isStoppingBackgroundWork =
+    stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
   const handleStopBackgroundWork = useCallback(async () => {
     if (!activeThread) return;
-    setIsStoppingBackgroundWork(true);
+    const requestKey = `${environmentId}:${activeThread.id}`;
+    setStoppingBackgroundWorkKey(requestKey);
     const result = await interruptThreadTurn({
       environmentId,
       input: { threadId: activeThread.id },
     });
+    // Acceptance does not confirm termination. Allow retry while the provider
+    // finishes stopping the tasks or reports a failure.
+    setStoppingBackgroundWorkKey((current) => (current === requestKey ? null : current));
     if (result._tag === "Failure") {
-      setIsStoppingBackgroundWork(false);
       if (!isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         setThreadError(
@@ -7248,6 +7253,13 @@ export default function ChatView(props: ChatViewProps) {
         event.preventDefault();
         event.stopPropagation();
         if (!event.repeat) branchToolbarRef.current?.usePreviousWorktree();
+        return;
+      }
+
+      if (command === "thread.steerQueuedMessage") {
+        if (!queuedRunsControlRef.current?.steerNext(event.repeat)) return;
+        event.preventDefault();
+        event.stopPropagation();
         return;
       }
 
@@ -9695,6 +9707,7 @@ export default function ChatView(props: ChatViewProps) {
   const workspaceFileDropHandlers = makeWorkspaceFileDropHandlers({
     setDragActive: setIsWorkspaceFileDragActive,
     addFiles: (files) => composerRef.current?.addDroppedFiles(files),
+    addFolders: (folders) => composerRef.current?.addDroppedFolders(folders),
   });
 
   return (
@@ -10020,6 +10033,12 @@ export default function ChatView(props: ChatViewProps) {
                             queuedRunsControl={
                               isServerThread && activeThread ? (
                                 <QueuedRunsControl
+                                  ref={queuedRunsControlRef}
+                                  steerShortcutLabel={shortcutLabelForCommand(
+                                    keybindings,
+                                    "thread.steerQueuedMessage",
+                                    { context: { terminalFocus: false } },
+                                  )}
                                   environmentId={activeThread.environmentId}
                                   threadId={activeThread.id}
                                   optimisticMessages={optimisticUserMessages}

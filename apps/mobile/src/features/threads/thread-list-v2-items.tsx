@@ -1,4 +1,4 @@
-import type { ThreadRowProviderInstance } from "./thread-provider-instance";
+import { resolveThreadProviderInstance } from "./thread-provider-instance";
 import { RowPressable } from "../../components/RowPressable";
 import { CustomSnoozeSheet } from "./CustomSnoozeSheet";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
@@ -18,6 +18,7 @@ import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } 
 import { Alert, Platform, Pressable, useWindowDimensions, View } from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 
+import type { ThreadListProvider } from "../../state/thread-list-environments";
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { ControlPillMenu } from "../../components/ControlPill";
@@ -36,6 +37,7 @@ import {
   resolveThreadListV2SnoozeMenuSelection,
   threadHasUnseenCompletion,
   resolveThreadListV2Status,
+  resolveThreadListV2ProviderDrivers,
   resolveThreadListV2SwipeActions,
   type ThreadListV2Status,
 } from "./threadListV2";
@@ -358,12 +360,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly snoozePresetMinute: string;
   readonly project: EnvironmentProject | null;
   readonly projectTitle?: string;
-  /** Provider drivers back to front: earlier owners first, current last.
-      Empty when the environment's config has not resolved yet. */
-  readonly providerDrivers: ReadonlyArray<string>;
-  /** Account-aware presentation for the current provider owner. */
-  readonly providerInstance: ThreadRowProviderInstance | null;
-  readonly providerIconUrl?: string | null;
+  /** Keep the environment's provider array stable across unrelated list updates. */
+  readonly providers: ReadonlyArray<ThreadListProvider> | undefined;
   /** Which machine hosts the thread. Null when only one environment is
       connected — repeating the same label on every row is noise. Mirrors
       the web sidebar's remote-environment cloud icon, but as text since
@@ -388,6 +386,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
   readonly onNewThreadOnBranch: (thread: EnvironmentThreadShell) => void;
+  readonly onRenameThread: (thread: EnvironmentThreadShell) => void;
   readonly onRegenerateThreadTitle: (thread: EnvironmentThreadShell) => void;
   readonly onSettleThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
   readonly onSnoozeThread: (thread: EnvironmentThreadShell, snoozedUntil: string) => void;
@@ -429,6 +428,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     variant,
     onSelectThread,
     onDeleteThread,
+    onRenameThread,
     onRegenerateThreadTitle,
     onNewThreadOnBranch,
     onSettleThread,
@@ -442,6 +442,19 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   } = props;
   const snoozedRow = props.snoozed === true;
   const pinnedRow = props.pinned === true;
+
+  const { providerDrivers, providerInstance, providerIconUrl } = useMemo(() => {
+    const provider = props.providers?.find(
+      (candidate) =>
+        candidate.instanceId ===
+        (thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId),
+    );
+    return {
+      providerDrivers: resolveThreadListV2ProviderDrivers(thread, props.providers),
+      providerInstance: resolveThreadProviderInstance(props.providers, thread),
+      providerIconUrl: provider?.iconUrl,
+    };
+  }, [thread, props.providers]);
 
   const pr = useThreadPr(thread);
 
@@ -475,6 +488,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     settledTimestamp !== null ? relativeTime(settledTimestamp) : threadTimeLabel(thread);
 
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
+  const handleRename = useCallback(() => onRenameThread(thread), [onRenameThread, thread]);
   const handleRegenerateTitle = useCallback(
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
@@ -567,12 +581,14 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       variant,
     ],
   );
-  const titleRegenerationMenuItems = useMemo<MenuAction[]>(
-    () =>
-      buildThreadTitleRegenerationMenuItems({
+  const titleMenuItems = useMemo<MenuAction[]>(
+    () => [
+      { id: "rename", title: "Rename", image: "square.and.pencil" },
+      ...buildThreadTitleRegenerationMenuItems({
         supported: props.titleRegenerationSupported,
         isRegenerating: thread.titleRegeneration != null,
       }),
+    ],
     [props.titleRegenerationSupported, thread.titleRegeneration],
   );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
@@ -585,19 +601,19 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         subactions: snoozePresetActions,
       },
       ...arrangementMenuItems,
-      ...titleRegenerationMenuItems,
+      ...titleMenuItems,
       { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
     ],
-    [arrangementMenuItems, snoozePresetActions, titleRegenerationMenuItems],
+    [arrangementMenuItems, snoozePresetActions, titleMenuItems],
   );
   const cardMenuActions = useMemo<MenuAction[]>(
     () => [
       CARD_MENU_ACTIONS[0]!,
       ...arrangementMenuItems,
-      ...titleRegenerationMenuItems,
+      ...titleMenuItems,
       ...CARD_MENU_ACTIONS.slice(1),
     ],
-    [arrangementMenuItems, titleRegenerationMenuItems],
+    [arrangementMenuItems, titleMenuItems],
   );
   const slimMenuActions = useMemo<MenuAction[]>(
     () => [
@@ -605,23 +621,23 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       ...arrangementMenuItems.filter(
         (action) => action.id !== "move-up" && action.id !== "move-down",
       ),
-      ...titleRegenerationMenuItems,
+      ...titleMenuItems,
       SLIM_MENU_ACTIONS[1]!,
     ],
-    [arrangementMenuItems, titleRegenerationMenuItems],
+    [arrangementMenuItems, titleMenuItems],
   );
   const snoozedMenuActions = useMemo<MenuAction[]>(
-    () => [SNOOZED_MENU_ACTIONS[0]!, ...titleRegenerationMenuItems, SNOOZED_MENU_ACTIONS[1]!],
-    [titleRegenerationMenuItems],
+    () => [SNOOZED_MENU_ACTIONS[0]!, ...titleMenuItems, SNOOZED_MENU_ACTIONS[1]!],
+    [titleMenuItems],
   );
   const legacyMenuActions = useMemo<MenuAction[]>(
     () => [
       LEGACY_MENU_ACTIONS[0]!,
       ...arrangementMenuItems,
-      ...titleRegenerationMenuItems,
+      ...titleMenuItems,
       LEGACY_MENU_ACTIONS[1]!,
     ],
-    [arrangementMenuItems, titleRegenerationMenuItems],
+    [arrangementMenuItems, titleMenuItems],
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -635,6 +651,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "move-up") handleMoveUp();
       if (nativeEvent.event === "move-down") handleMoveDown();
       if (nativeEvent.event === "archive") handleArchive();
+      if (nativeEvent.event === "rename") handleRename();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "delete") handleDelete();
       if (nativeEvent.event === "snooze:custom") {
@@ -658,6 +675,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       handleArchive,
       handleDelete,
       handleRegenerateTitle,
+      handleRename,
       handleMoveDown,
       handleMoveUp,
       handlePin,
@@ -923,23 +941,23 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             </Text>
           </View>
         ) : null}
-        {props.providerInstance ? (
+        {providerInstance ? (
           // Earlier owners peek out behind the current provider so a
           // handed-off thread shows where it has been. The current owner
           // keeps its account badge so same-driver instances stay distinct.
           <View className="flex-row items-center">
-            {props.providerDrivers.slice(0, -1).map((driver, index) => (
+            {providerDrivers.slice(0, -1).map((driver, index) => (
               <View key={`${driver}:${index}`} className="-mr-1 opacity-30">
                 <ProviderIcon provider={driver} size={12} />
               </View>
             ))}
             <ProviderInstanceIcon
-              iconUrl={props.providerIconUrl}
-              provider={props.providerInstance.driverKind}
+              iconUrl={providerIconUrl}
+              provider={providerInstance.driverKind}
               size={14}
-              displayName={props.providerInstance.displayName}
-              accentColor={props.providerInstance.accentColor}
-              showBadge={props.providerInstance.showBadge}
+              displayName={providerInstance.displayName}
+              accentColor={providerInstance.accentColor}
+              showBadge={providerInstance.showBadge}
               surfaceColor={providerIconSurfaceColor}
             />
           </View>

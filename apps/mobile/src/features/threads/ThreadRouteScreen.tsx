@@ -20,7 +20,8 @@ import {
 } from "@t3tools/shared/projectScripts";
 import { Alert, Platform, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useWorkspaceState } from "../../state/workspace";
+import { useConnectionsReady } from "../../state/workspace";
+import { useEnvironmentShellReadiness } from "../../state/shell";
 import { restoredNewTaskDraftKey } from "../../state/new-task-draft-key";
 import { clearPendingThreadCreationOutcome } from "../../state/pending-thread-creation";
 import { recoverFailedThreadDraft } from "../../state/recover-failed-thread-draft";
@@ -70,6 +71,8 @@ import { useSelectedThreadGitState } from "../../state/use-selected-thread-git-s
 import { useSelectedThreadRequests } from "../../state/use-selected-thread-requests";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
+import { resolveMergeBackTargetThreadId } from "@t3tools/client-runtime/state/thread-relationships";
+import { resolveLatestMergeBackRun } from "@t3tools/client-runtime/state/thread-workflows";
 import { threadEnvironment } from "../../state/threads";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
@@ -84,6 +87,7 @@ import {
   ThreadInspectorContentStack,
   type ThreadInspectorMode,
 } from "./thread-inspector-content-stack";
+import { threadRouteIsHydrating } from "./thread-route-hydration";
 
 interface ThreadInspectorSelection {
   readonly routeThreadIdentity: string | null;
@@ -119,7 +123,11 @@ interface ThreadRouteScreenProps extends ThreadRouteScreenRouteProps {
   readonly renderInspector?: (headerInset: number) => ReactNode;
 }
 
-function ThreadUnavailableScreen() {
+/** Shows recovery only after the target route has reached a terminal unavailable state. */
+function ThreadUnavailableScreen(props: {
+  readonly actionLabel: string;
+  readonly onAction: () => void;
+}) {
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
@@ -134,13 +142,15 @@ function ThreadUnavailableScreen() {
       <EmptyState
         title="Thread unavailable"
         detail="This thread is not available in the current mobile snapshot."
+        actionLabel={props.actionLabel}
+        onAction={props.onAction}
       />
     </ScrollView>
   );
 }
 
 export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
-  const { state: workspaceState } = useWorkspaceState();
+  const connectionsReady = useConnectionsReady();
   const { connectionState } = useRemoteConnectionStatus();
   const { selectedThread } = useThreadSelection();
   const params = props.route.params;
@@ -148,6 +158,9 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
   const threadIdRaw = firstRouteParam(params.threadId);
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
   const routeEnvironmentRuntime = useRemoteEnvironmentRuntime(environmentId);
+  const routeEnvironmentShellState = useEnvironmentShellReadiness(environmentId);
+  const { onReconnectEnvironment } = useRemoteConnections();
+  const navigation = useNavigation();
   const routeConnectionState =
     routeEnvironmentRuntime?.connectionState ?? (environmentId ? "available" : connectionState);
   const routeThreadKey =
@@ -173,16 +186,36 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
     return <ThreadRouteContent {...props} selectedThreadDetailState={selectedThreadDetailState} />;
   }
 
-  const stillHydrating =
-    workspaceState.isLoadingConnections ||
-    routeConnectionState === "connecting" ||
-    routeConnectionState === "reconnecting";
+  const stillHydrating = threadRouteIsHydrating({
+    isLoadingConnections: !connectionsReady,
+    connectionState: routeConnectionState,
+    shellStatus: routeEnvironmentShellState.status,
+    shellHasError: routeEnvironmentShellState.hasError,
+    detailStatus: selectedThreadDetailState.status,
+    detailHasError: Option.isSome(selectedThreadDetailState.error),
+  });
 
   if (stillHydrating) {
     return <OpeningThreadLoadingScreen />;
   }
 
-  return <ThreadUnavailableScreen />;
+  return (
+    <ThreadUnavailableScreen
+      actionLabel={
+        routeEnvironmentRuntime === null ? "Manage environments" : "Reconnect environment"
+      }
+      onAction={() => {
+        if (routeEnvironmentRuntime !== null) {
+          onReconnectEnvironment(environmentId);
+          return;
+        }
+        navigation.navigate("SettingsSheet", {
+          screen: "SettingsContent",
+          params: { screen: "SettingsEnvironments" },
+        });
+      }}
+    />
+  );
 }
 
 function ThreadRouteContent(
@@ -241,6 +274,40 @@ function ThreadRouteContent(
     };
   }, [loadEarlierHistory, selectedThread, selectedThreadDetailState.history]);
   const navigation = useNavigation();
+  const mergeBack = useAtomCommand(threadEnvironment.mergeBack, "merge thread back");
+  const mergeBackTargetThreadId = resolveMergeBackTargetThreadId(selectedThreadDetail);
+  const mergeBackRun =
+    selectedThreadDetail === null ? null : resolveLatestMergeBackRun(selectedThreadDetail);
+  const mergeBackBusyRef = useRef(false);
+  const handleMergeBack = useCallback(async () => {
+    if (
+      mergeBackBusyRef.current ||
+      !selectedThread ||
+      mergeBackTargetThreadId === null ||
+      mergeBackRun === null
+    ) {
+      return;
+    }
+    mergeBackBusyRef.current = true;
+    try {
+      const result = await mergeBack({
+        environmentId: selectedThread.environmentId,
+        input: {
+          sourceThreadId: selectedThread.id,
+          targetThreadId: mergeBackTargetThreadId,
+          runId: mergeBackRun.id,
+          creationSource: "mobile",
+        },
+      });
+      if (result._tag !== "Success") return;
+      navigation.navigate("Thread", {
+        environmentId: selectedThread.environmentId,
+        threadId: mergeBackTargetThreadId,
+      });
+    } finally {
+      mergeBackBusyRef.current = false;
+    }
+  }, [mergeBack, mergeBackRun, mergeBackTargetThreadId, navigation, selectedThread]);
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
@@ -641,6 +708,10 @@ function ThreadRouteContent(
     onOpenFilesInspector:
       fileInspector.supported && selectedThreadCwd !== null ? handleOpenFilesInspector : undefined,
     onOpenGitInspector: fileInspector.supported ? handleOpenGitInspector : undefined,
+    onMergeBack:
+      mergeBackTargetThreadId !== null && mergeBackRun !== null
+        ? () => void handleMergeBack()
+        : undefined,
     currentBranch: selectedThread?.branch ?? null,
     gitStatus: gitStatus.data,
     gitOperationLabel: gitState.gitOperationLabel,
@@ -733,6 +804,13 @@ function ThreadRouteContent(
       icon: "point.topleft.down.curvedto.point.bottomright.up",
       onPress: handleOpenGitInspector,
     });
+    if (mergeBackTargetThreadId !== null && mergeBackRun !== null) {
+      actions.push({
+        accessibilityLabel: "Merge back to source",
+        icon: "arrow.triangle.merge",
+        onPress: () => void handleMergeBack(),
+      });
+    }
     if (fileInspector.supported && selectedThreadCwd !== null) {
       actions.push({
         accessibilityLabel: "Toggle inspector",
@@ -743,10 +821,13 @@ function ThreadRouteContent(
     return actions;
   }, [
     fileInspector.supported,
+    handleMergeBack,
     handleOpenFilesInspector,
     handleOpenTerminal,
     handleOpenGitInspector,
     handleToggleInspector,
+    mergeBackRun,
+    mergeBackTargetThreadId,
     props.onReturnToThread,
     selectedThreadCwd,
     selectedThreadProject?.workspaceRoot,
@@ -883,6 +964,13 @@ function ThreadRouteContent(
           historyControls={historyControls}
           activeThreadBusy={composer.activeThreadBusy}
           canStopThread={composer.interruptibleRunId !== null}
+          queuedRunEdit={composer.queuedRunEdit}
+          composerDraftKey={composer.composerDraftKey}
+          followUpBehavior={composer.followUpBehavior}
+          canSteerActiveTurn={composer.canSteerActiveTurn}
+          isSavingQueuedEdit={composer.isSavingQueuedEdit}
+          onCancelQueuedRunEdit={composer.cancelQueuedRunEdit}
+          onRemoveQueuedEditAttachment={composer.onRemoveQueuedEditAttachment}
           environmentId={selectedThread.environmentId}
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}

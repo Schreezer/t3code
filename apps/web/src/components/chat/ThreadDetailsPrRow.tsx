@@ -1,5 +1,6 @@
+import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 /**
- * The thread details panel's pull request row: what the branch's pull request is, and the one
+ * The thread details panel's pull request row: what the thread's pull request is, and the one
  * thing worth doing to it right now.
  *
  * The row itself opens the pull request in the right panel, exactly as it always has. Around
@@ -11,7 +12,7 @@
  * answers what previously took opening the panel.
  *
  * Until the detail arrives — or where pull requests are not supported at all — the row renders
- * from the `vcs.status` summary alone, which is the plain row this panel showed before.
+ * from the linked snapshot or branch summary, or just the link when status is unavailable.
  */
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId, ProjectId, PullRequestRef } from "@t3tools/contracts";
@@ -70,6 +71,8 @@ import {
 export function ThreadDetailsPrRow({
   environmentId,
   pr,
+  number,
+  reference: linkedReference,
   status,
   project,
   label,
@@ -78,8 +81,10 @@ export function ThreadDetailsPrRow({
   onActed,
 }: {
   environmentId: EnvironmentId;
-  pr: NonNullable<ThreadPr>;
-  status: PrStatusIndicator;
+  pr: ThreadPr;
+  number: number;
+  reference?: Pick<PullRequestRef, "host" | "repository" | "number"> | null;
+  status: PrStatusIndicator | null;
   /** The thread's project, which is what the pull request is read through on the host. */
   project: EnvironmentProject | null;
   label: string;
@@ -97,8 +102,12 @@ export function ThreadDetailsPrRow({
     identity?.displayName ??
     (identity?.owner && identity.name ? `${identity.owner}/${identity.name}` : null);
   const reference: PullRequestRef | null =
-    supportsPullRequests && project !== null && repository !== null
-      ? { projectId: project.id as ProjectId, repository, number: pr.number }
+    supportsPullRequests && project !== null
+      ? linkedReference
+        ? { ...linkedReference, projectId: project.id as ProjectId }
+        : repository !== null
+          ? { projectId: project.id as ProjectId, repository, number }
+          : null
       : null;
   const detailQuery = useEnvironmentQuery(
     reference === null ? null : pullRequestEnvironment.detail({ environmentId, input: reference }),
@@ -157,27 +166,26 @@ export function ThreadDetailsPrRow({
     );
   };
 
-  // Once the host has answered, the glyph knows about drafts and conflicts, which the vcs
-  // summary does not. Draft outranks conflicts in it, same as the detail panel.
+  // Host details distinguish drafts; all panels share the same PR-state glyph.
   const statePresentation =
     detail === null
       ? null
       : resolvePullRequestState({
           state: detail.state,
           isDraft: detail.isDraft,
-          mergeability: detail.mergeability,
-          baseBranch: detail.baseBranch,
         });
   const icon = statePresentation ? (
     <statePresentation.Icon
       aria-hidden
       className={cn("-mx-0.5 size-4 shrink-0", statePresentation.toneClassName)}
     />
-  ) : (
+  ) : pr && status ? (
     <ChangeRequestStatusIcon
       state={pr.state}
       className={cn(THREAD_DETAILS_PANEL_ICON_CLASS, status.colorClass)}
     />
+  ) : (
+    <PullRequestGlyph.pullRequest className={THREAD_DETAILS_PANEL_ICON_CLASS} />
   );
 
   // Everything the host reported, at a glance. The row stays one line; the tooltip is where the
@@ -185,7 +193,7 @@ export function ThreadDetailsPrRow({
   // detail rows, so the two read as one family.
   const rowTooltip =
     detail === null || statePresentation === null ? (
-      <TooltipPopup side="top">{status.tooltip}</TooltipPopup>
+      <TooltipPopup side="top">{status?.tooltip ?? `Pull request #${number}`}</TooltipPopup>
     ) : (
       <TooltipPopup
         side="top"
@@ -392,7 +400,7 @@ export function ThreadDetailsPrRow({
             <AlertDialogHeader>
               <AlertDialogTitle>Merge pull request?</AlertDialogTitle>
               <AlertDialogDescription>
-                This merges #{pr.number} using {selectedMergeMethod}.
+                This merges #{number} using {selectedMergeMethod}.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
