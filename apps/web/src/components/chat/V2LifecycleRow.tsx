@@ -1,8 +1,8 @@
+import { resolveHandoffEndpoints, type HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
 import { Fragment } from "react";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import {
   ProviderDriverKind,
-  type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
   type ProviderInstanceId,
   type ServerProvider,
@@ -51,15 +51,7 @@ const TERMINAL_SUBAGENT_STATUSES = new Set<OrchestrationV2TurnItem["status"]>([
   "interrupted",
 ]);
 
-/**
- * The subset of a projection run that handoff rows read. Kept minimal so the
- * timeline can hold a content-stable snapshot: run status/timestamps churn on
- * every stream event, but these fields only change when a run is added.
- */
-export type HandoffTimelineRun = Pick<
-  OrchestrationV2Run,
-  "id" | "ordinal" | "providerInstanceId" | "modelSelection"
->;
+export type { HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
 
 export function V2LifecycleRow(props: {
   readonly item: OrchestrationV2TurnItem;
@@ -118,28 +110,7 @@ export function V2LifecycleRow(props: {
     );
   }
   if (item.type === "handoff") {
-    // Items persisted before models were stamped only carry instance ids;
-    // recover the models from the thread's runs (the handoff's own run is
-    // the target, the newest earlier run per source instance is the origin).
-    // HandoffEndpoint falls back to the provider display name when neither
-    // source has a model.
-    const handoffRun =
-      item.runId === null ? undefined : props.runs.find((run) => run.id === item.runId);
-    const toModel =
-      item.toModel ??
-      (handoffRun !== undefined && handoffRun.providerInstanceId === item.toProviderInstanceId
-        ? handoffRun.modelSelection.model
-        : undefined);
-    const fromEndpoints: ReadonlyArray<{
-      readonly instanceId: ProviderInstanceId;
-      readonly model?: string | undefined;
-    }> =
-      item.fromModelSelections !== undefined && item.fromModelSelections.length > 0
-        ? item.fromModelSelections
-        : item.fromProviderInstanceIds.map((instanceId) => ({
-            instanceId,
-            model: latestRunModelBefore(props.runs, instanceId, handoffRun?.ordinal),
-          }));
+    const { from: fromEndpoints, to } = resolveHandoffEndpoints(item, props.runs);
     return (
       <TimelineSystemDivider
         label="Context handoff"
@@ -147,7 +118,7 @@ export function V2LifecycleRow(props: {
         showDetailSeparator={false}
         tone={item.status === "failed" ? "danger" : "neutral"}
         detail={
-          <span className="inline-flex min-w-0 items-center gap-1.5">
+          <span className="inline-flex min-w-0 flex-wrap items-center justify-center gap-1.5">
             {fromEndpoints.map((endpoint, index) => (
               <Fragment key={`${endpoint.instanceId}:${endpoint.model ?? ""}`}>
                 {index > 0 ? (
@@ -168,7 +139,7 @@ export function V2LifecycleRow(props: {
             <HandoffEndpoint
               providers={props.providerStatuses}
               instanceId={item.toProviderInstanceId}
-              model={toModel}
+              model={to.model}
             />
           </span>
         }
@@ -318,26 +289,6 @@ function SubagentTimelineLink(props: {
   );
 }
 
-/**
- * Model of the newest run for `instanceId` that started before the handoff's
- * own run. Legacy handoff items don't record their source models, but the
- * covered runs are still in the projection.
- */
-function latestRunModelBefore(
-  runs: ReadonlyArray<HandoffTimelineRun>,
-  instanceId: ProviderInstanceId,
-  beforeOrdinal: number | undefined,
-): string | undefined {
-  let latest: HandoffTimelineRun | undefined;
-  for (const run of runs) {
-    if (run.providerInstanceId !== instanceId) continue;
-    if (beforeOrdinal !== undefined && run.ordinal >= beforeOrdinal) continue;
-    if (latest === undefined || run.ordinal > latest.ordinal) latest = run;
-  }
-  return latest?.modelSelection.model;
-}
-
-/** Provider icon with the resolved handoff model available on hover or focus. */
 function HandoffEndpoint(props: {
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly instanceId: ProviderInstanceId;
@@ -361,9 +312,7 @@ function HandoffEndpoint(props: {
         render={
           <span
             tabIndex={0}
-            role="img"
-            aria-label={label}
-            className="inline-flex shrink-0 items-center justify-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="inline-flex min-w-0 items-center gap-1 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <ProviderInstanceIcon
               driverKind={entry?.driverKind ?? ProviderDriverKind.make(props.instanceId)}
@@ -372,10 +321,13 @@ function HandoffEndpoint(props: {
               acpRegistryIconUrl={entry?.acpRegistryIconUrl}
               iconClassName="size-3"
             />
+            <span className="truncate">{label}</span>
           </span>
         }
       />
-      <TooltipPopup>{label}</TooltipPopup>
+      <TooltipPopup>
+        {entry?.displayName ?? props.instanceId} · {label}
+      </TooltipPopup>
     </Tooltip>
   );
 }

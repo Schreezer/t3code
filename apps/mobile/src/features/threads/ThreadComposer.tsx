@@ -50,6 +50,7 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import { themeColorWithAlpha } from "../../lib/mobileTheme";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import {
@@ -57,7 +58,7 @@ import {
   countComposerDraftAttachmentsAfterSelection,
 } from "../../state/use-composer-drafts";
 import type { ComposerDocumentAttachment } from "../../lib/composerContext";
-import { useProject } from "../../state/entities";
+import { useProject, useThreadShells } from "../../state/entities";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 
 import { AppText as Text } from "../../components/AppText";
@@ -185,6 +186,11 @@ export interface ThreadComposerProps {
   readonly onSendMessage: (followUp?: ActiveTurnComposerAction) => Promise<MessageId | null>;
   /** `/usage-limits` resolves locally; the host decides where the report shows. Null clears it. */
   readonly onShowUsageLimits: (report: UsageLimitsReport | null) => void;
+  /**
+   * Whether the model picker may offer providers other than this thread's.
+   * False keeps the catalog on the instance the thread's session runs on.
+   */
+  readonly canSwitchProvider: boolean;
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateInteractionMode: (interactionMode: ProviderInteractionMode) => void;
@@ -303,7 +309,6 @@ export function ComposerSurface(props: {
   /** Morphs between the compact and expanded composer layouts. */
   readonly animateLayout?: boolean;
 }) {
-  const { materialYouStyleLayoutActive } = useAppearancePreferences();
   const colors = useUniwindTheme();
   const targetBorderRadius =
     typeof props.style.borderRadius === "number" ? props.style.borderRadius : 0;
@@ -327,27 +332,23 @@ export function ComposerSurface(props: {
   return (
     <Animated.View
       className={
-        materialYouStyleLayoutActive
-          ? undefined
-          : "shadow-[0_6px_28px] shadow-adaptive-black-a15-a35"
+        Platform.OS === "android" ? undefined : "shadow-[0_6px_28px] shadow-adaptive-black-a15-a35"
       }
       layout={layoutTransition}
       style={[
         animatedShapeStyle,
         {
           overflow: "hidden",
-          // Android versions before 9 do not support outset box shadows.
-          elevation: Platform.OS === "android" && Platform.Version < 28 ? 10 : undefined,
         },
       ]}
     >
       <AnimatedGlassSurface
         chrome="none"
         fallbackColor={
-          materialYouStyleLayoutActive ? colors["--color-composer-surface"] : colors["--color-card"]
+          Platform.OS === "android" ? colors["--color-composer-surface"] : colors["--color-card"]
         }
         fallbackClassName={
-          materialYouStyleLayoutActive ? "border border-composer-border" : "border border-border"
+          Platform.OS === "android" ? "border border-composer-border" : "border border-border"
         }
         glassEffectStyle="regular"
         // The composer is a passive material containing interactive controls.
@@ -372,8 +373,7 @@ export function ComposerSurface(props: {
 
 export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposerProps) {
   const project = useProject(scopeProjectRef(props.environmentId, props.selectedThread.projectId));
-  const { materialYouStyleLayoutActive, themeVariables: materialTheme } =
-    useAppearancePreferences();
+  const { themeVariables: materialTheme } = useAppearancePreferences();
   const composerPanel = materialTheme["--color-composer-panel"];
   const navigation = useNavigation();
   const foregroundColor = useUniwindTheme()["--color-foreground"];
@@ -486,6 +486,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     draftMessage: props.draftMessage,
     ownerKey: composerOwnerKey,
     environmentId: props.environmentId,
+    threadShells: useThreadShells(),
+    currentThreadId: props.selectedThread.id,
     projectCwd: props.projectCwd,
     pullRequestProjectId: props.serverConfig?.environment.capabilities.pullRequests
       ? (project?.id ?? null)
@@ -637,17 +639,15 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   );
 
   // ── Model menu ───────────────────────────────────────────
+  // A session that hands the conversation to another provider lets the picker
+  // offer the whole catalog; one that can't stays on its own instance.
+  const lockedProviderInstanceId = props.canSwitchProvider
+    ? undefined
+    : currentModelSelection.instanceId;
   const modelOptions = useMemo(
-    () =>
-      buildModelOptions(
-        props.serverConfig,
-        currentModelSelection,
-        currentModelSelection.instanceId,
-      ),
-    [props.serverConfig, currentModelSelection],
+    () => buildModelOptions(props.serverConfig, currentModelSelection, lockedProviderInstanceId),
+    [props.serverConfig, currentModelSelection, lockedProviderInstanceId],
   );
-  // An existing thread is bound to its harness: sessions can't move between
-  // provider instances, so the picker only offers the thread's own group.
   const threadProviderGroups = useMemo(() => groupByProvider(modelOptions), [modelOptions]);
   const currentModelOption =
     modelOptions.find(
@@ -744,7 +744,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       style={{
         paddingTop: isExpanded ? 8 : 6,
         paddingBottom: (props.bottomInset ?? 0) + (isExpanded ? 8 : 6),
-        backgroundColor: materialYouStyleLayoutActive ? composerPanel : undefined,
+        backgroundColor:
+          Platform.OS === "android" ? themeColorWithAlpha(composerPanel, 1) : undefined,
       }}
     >
       {/* The backdrop gradient lives on a plain View: Reanimated's Animated.View
@@ -752,7 +753,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           strip fully transparent and the feed text legible through the composer. */}
       <View
         className={
-          materialYouStyleLayoutActive
+          Platform.OS === "android"
             ? "hidden"
             : "absolute inset-0 bg-linear-to-b from-screen/0 via-screen/60 to-screen/90"
         }

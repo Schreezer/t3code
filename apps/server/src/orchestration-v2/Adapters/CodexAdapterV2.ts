@@ -1,3 +1,4 @@
+import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import {
   mcpToolPresentation,
   type McpToolPresentation,
@@ -48,7 +49,6 @@ import * as CodexSchema from "effect-codex-app-server/schema";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -699,6 +699,9 @@ export function buildCodexTurnStartParams(input: {
       input: input.codexInput,
       cwd: input.runtimePolicy.cwd,
       model: input.modelSelection.model,
+      // Model catalogues can default summaries to "none". Request them on every
+      // turn, including resumed threads, for T3's reasoning timeline.
+      summary: "detailed",
       // Always explicit: omitting this on resume leaves Codex's previous
       // reviewer sticky after switching away from Auto mode.
       approvalsReviewer: runtimeModeDefaults.approvalsReviewer,
@@ -1064,157 +1067,6 @@ type CodexSubAgentActivityItem = Extract<
   | CodexSchema.V2ItemCompletedNotification__ThreadItem,
   { readonly type: "subAgentActivity" }
 >;
-
-export interface CodexAgentMessageDeltaUpdate {
-  readonly turnId: string;
-  readonly itemId: string;
-  readonly text: string;
-  readonly completed: boolean;
-}
-
-export interface CodexAgentMessageDeltaCoalescer {
-  readonly append: (input: {
-    readonly turnId: string;
-    readonly itemId: string;
-    readonly delta: string;
-  }) => Effect.Effect<void>;
-  readonly complete: (input: {
-    readonly turnId: string;
-    readonly itemId: string;
-    readonly finalText?: string;
-    readonly emitEmpty?: boolean;
-  }) => Effect.Effect<string>;
-  readonly flushTurn: (turnId: string) => Effect.Effect<void>;
-}
-
-interface BufferedCodexAgentMessage {
-  readonly turnId: string;
-  readonly itemId: string;
-  readonly text: string;
-  readonly dirty: boolean;
-}
-
-function codexAgentMessageBufferKey(turnId: string, itemId: string): string {
-  return `${turnId}\u0000${itemId}`;
-}
-
-export const makeCodexAgentMessageDeltaCoalescer = Effect.fn(
-  "CodexAdapterV2.makeCodexAgentMessageDeltaCoalescer",
-)(function* (input: {
-  readonly flushIntervalMs: number;
-  readonly emit: (update: CodexAgentMessageDeltaUpdate) => Effect.Effect<void>;
-}): Effect.fn.Return<CodexAgentMessageDeltaCoalescer, never, Scope.Scope> {
-  const buffered = yield* Ref.make(new Map<string, BufferedCodexAgentMessage>());
-  const flushScheduled = yield* Ref.make(false);
-  const flushLock = yield* Semaphore.make(1);
-  const coalescerScope = yield* Effect.scope;
-
-  const drain = (options: {
-    readonly predicate: (message: BufferedCodexAgentMessage) => boolean;
-    readonly completed: boolean;
-    readonly onlyDirty: boolean;
-    readonly releaseSchedule?: boolean;
-  }) =>
-    flushLock.withPermit(
-      Effect.gen(function* () {
-        const current = yield* Ref.get(buffered);
-        const updates: Array<CodexAgentMessageDeltaUpdate> = [];
-        for (const message of current.values()) {
-          if (!options.predicate(message) || (options.onlyDirty && !message.dirty)) {
-            continue;
-          }
-          updates.push({
-            turnId: message.turnId,
-            itemId: message.itemId,
-            text: message.text,
-            completed: options.completed,
-          });
-        }
-        const emitUpdates = Effect.forEach(updates, input.emit, { discard: true });
-        yield* options.releaseSchedule === true
-          ? emitUpdates.pipe(Effect.ensuring(Ref.set(flushScheduled, false)))
-          : emitUpdates;
-        yield* Ref.update(buffered, (current) => {
-          const next = new Map(current);
-          for (const [key, message] of current) {
-            if (!options.predicate(message) || (options.onlyDirty && !message.dirty)) {
-              continue;
-            }
-            if (options.completed) {
-              next.delete(key);
-            } else {
-              next.set(key, { ...message, dirty: false });
-            }
-          }
-          return next;
-        });
-      }),
-    );
-
-  const flushDirty = drain({
-    predicate: () => true,
-    completed: false,
-    onlyDirty: true,
-    releaseSchedule: true,
-  });
-
-  return {
-    append: ({ turnId, itemId, delta }) =>
-      delta.length === 0
-        ? Effect.void
-        : Effect.uninterruptible(
-            Effect.gen(function* () {
-              const shouldSchedule = yield* flushLock.withPermit(
-                Effect.gen(function* () {
-                  yield* Ref.update(buffered, (current) => {
-                    const key = codexAgentMessageBufferKey(turnId, itemId);
-                    const existing = current.get(key);
-                    const next = new Map(current);
-                    next.set(key, {
-                      turnId,
-                      itemId,
-                      text: `${existing?.text ?? ""}${delta}`,
-                      dirty: true,
-                    });
-                    return next;
-                  });
-                  return yield* Ref.modify(flushScheduled, (scheduled) => [!scheduled, true]);
-                }),
-              );
-              if (shouldSchedule) {
-                yield* Effect.sleep(Duration.millis(Math.max(1, input.flushIntervalMs))).pipe(
-                  Effect.andThen(flushDirty),
-                  Effect.interruptible,
-                  Effect.forkIn(coalescerScope),
-                );
-              }
-            }),
-          ),
-    complete: ({ turnId, itemId, finalText, emitEmpty = true }) =>
-      flushLock.withPermit(
-        Effect.gen(function* () {
-          const key = codexAgentMessageBufferKey(turnId, itemId);
-          const existing = (yield* Ref.get(buffered)).get(key);
-          const text = finalText !== undefined ? finalText : (existing?.text ?? "");
-          if (emitEmpty || text.length > 0) {
-            yield* input.emit({ turnId, itemId, text, completed: true });
-          }
-          yield* Ref.update(buffered, (current) => {
-            const next = new Map(current);
-            next.delete(key);
-            return next;
-          });
-          return text;
-        }),
-      ),
-    flushTurn: (turnId) =>
-      drain({
-        predicate: (message) => message.turnId === turnId,
-        completed: true,
-        onlyDirty: false,
-      }),
-  };
-});
 
 export interface CodexAppServerClientFactoryShape {
   readonly open: (input: {
@@ -2811,7 +2663,98 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             return { node, message, turnItem };
           });
 
-        const agentMessageDeltas = yield* makeCodexAgentMessageDeltaCoalescer({
+        // Summary and raw reasoning are separate streams, with independently indexed parts.
+        // Reuse the text coalescer so token bursts do not create one database write per token.
+        const reasoningParts = new Map<
+          string,
+          { turnId: string; nativeItemId: string; stream: "summary" | "content"; index: number }
+        >();
+        const reasoningDeltas = yield* makeProviderTextDeltaCoalescer({
+          flushIntervalMs: CODEX_ASSISTANT_DELTA_FLUSH_INTERVAL_MS,
+          emit: (update) =>
+            Effect.gen(function* () {
+              const part = reasoningParts.get(update.itemId);
+              if (part === undefined) return;
+              const context = yield* awaitActiveTurn(update.turnId);
+              if (context === undefined) return;
+              const artifacts = yield* buildAgentMessageArtifacts(
+                context,
+                { id: update.itemId, text: update.text },
+                update.completed,
+              );
+              const interrupted = (yield* Ref.get(terminalizedNonCompletedNativeTurns)).has(
+                update.turnId,
+              );
+              const { messageId: _messageId, ...item } = artifacts.turnItem;
+              const nativeItemRef = codexNativeItemRef(part.nativeItemId);
+              yield* emitProviderEvent({
+                type: "node.updated",
+                driver: CODEX_PROVIDER,
+                node: {
+                  ...artifacts.node,
+                  kind: "reasoning",
+                  nativeItemRef,
+                  ...(interrupted ? { status: "interrupted" as const } : {}),
+                },
+              });
+              yield* emitProviderEvent({
+                type: "turn_item.updated",
+                driver: CODEX_PROVIDER,
+                turnItem: {
+                  ...item,
+                  type: "reasoning",
+                  nativeItemRef,
+                  ...(interrupted ? { status: "interrupted" as const } : {}),
+                },
+              });
+            }),
+        });
+        const reasoningPartKey = (
+          turnId: string,
+          nativeItemId: string,
+          stream: "summary" | "content",
+          index: number,
+        ) => {
+          const key = JSON.stringify([turnId, nativeItemId, stream, index]);
+          reasoningParts.set(key, { turnId, nativeItemId, stream, index });
+          return key;
+        };
+        const appendReasoning = Effect.fn("CodexAdapterV2.appendReasoning")(function* (
+          payload: { turnId: string; itemId: string; delta: string },
+          stream: "summary" | "content",
+          index: number,
+        ) {
+          const context = yield* awaitActiveTurn(payload.turnId);
+          if (context === undefined || payload.delta.length === 0) return;
+          yield* completeProviderRetry(context, yield* DateTime.now);
+          const itemId = reasoningPartKey(payload.turnId, payload.itemId, stream, index);
+          // Reserve the position before the delayed flush, ahead of later tool items.
+          yield* resolveItemOrdinal(context, itemId);
+          yield* reasoningDeltas.append({ turnId: payload.turnId, itemId, delta: payload.delta });
+        });
+        const completeReasoning = Effect.fn("CodexAdapterV2.completeReasoning")(function* (
+          turnId: string,
+          item: { id: string; summary?: ReadonlyArray<string>; content?: ReadonlyArray<string> },
+        ) {
+          for (const stream of ["summary", "content"] as const) {
+            for (const [index] of (item[stream] ?? []).entries()) {
+              reasoningPartKey(turnId, item.id, stream, index);
+            }
+          }
+          for (const [key, part] of reasoningParts) {
+            if (part.turnId !== turnId || part.nativeItemId !== item.id) continue;
+            const finalText = item[part.stream]?.[part.index];
+            yield* reasoningDeltas.complete({
+              turnId,
+              itemId: key,
+              ...(finalText ? { finalText } : {}),
+              emitEmpty: false,
+            });
+            reasoningParts.delete(key);
+          }
+        });
+
+        const agentMessageDeltas = yield* makeProviderTextDeltaCoalescer({
           flushIntervalMs: CODEX_ASSISTANT_DELTA_FLUSH_INTERVAL_MS,
           emit: (update) =>
             Effect.gen(function* () {
@@ -3508,6 +3451,13 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           }),
         );
 
+        yield* client.handleServerNotification("item/reasoning/summaryTextDelta", (payload) =>
+          appendReasoning(payload, "summary", payload.summaryIndex),
+        );
+        yield* client.handleServerNotification("item/reasoning/textDelta", (payload) =>
+          appendReasoning(payload, "content", payload.contentIndex),
+        );
+
         yield* client.handleServerNotification("item/plan/delta", (payload) =>
           Effect.gen(function* () {
             const context = yield* awaitActiveTurn(payload.turnId);
@@ -3881,6 +3831,11 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               return;
             }
             const { context, settled } = resolved;
+
+            if (payload.item.type === "reasoning") {
+              yield* completeReasoning(payload.turnId, payload.item);
+              return;
+            }
 
             if (payload.item.type === "contextCompaction") {
               yield* emitCompactionItem(context, payload.item.id, "completed");
@@ -4757,6 +4712,10 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                 });
               }
               yield* agentMessageDeltas.flushTurn(input.nativeTurnId);
+              yield* reasoningDeltas.flushTurn(input.nativeTurnId);
+              for (const [key, part] of reasoningParts) {
+                if (part.turnId === input.nativeTurnId) reasoningParts.delete(key);
+              }
               yield* emitProviderEvent({
                 type: "provider_turn.updated",
                 driver: CODEX_PROVIDER,

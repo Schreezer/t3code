@@ -1,3 +1,7 @@
+import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
+import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
+import { useWorktreeSetup } from "./use-worktree-setup";
+import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import {
   StackActions,
@@ -28,17 +32,17 @@ import { recoverFailedThreadDraft } from "../../state/recover-failed-thread-draf
 import { useEnvironmentQuery } from "../../state/query";
 import { dismissGitActionResult, useGitActionProgress } from "../../state/use-vcs-action-state";
 import { vcsEnvironment } from "../../state/vcs";
-
 import { EmptyState } from "../../components/EmptyState";
 import {
+  AndroidHeaderIconButton,
   AndroidScreenHeader,
   type AndroidHeaderAction,
 } from "../../components/AndroidScreenHeader";
+import { AndroidWorkspaceSidebarButton } from "../layout/workspace-sidebar-toolbar";
 import { LoadingScreen } from "../../components/LoadingScreen";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { connectionTone } from "../connection/connectionTone";
-
 import {
   useRemoteConnections,
   useRemoteConnectionStatus,
@@ -223,7 +227,7 @@ function ThreadRouteContent(
     readonly selectedThreadDetailState: ReturnType<typeof useSelectedThreadDetailState>;
   },
 ) {
-  const { materialYouStyleLayoutActive, themeVariables } = useAppearancePreferences();
+  const { themeVariables } = useAppearancePreferences();
   const headerColor = themeVariables["--color-header"];
   const {
     fileInspector,
@@ -786,10 +790,12 @@ function ThreadRouteContent(
       });
     }
     if (selectedThreadCwd !== null) {
+      const filesVisible = inspectorMode === "files" && panes.auxiliaryPaneVisible;
       actions.push({
-        accessibilityLabel: "Open files",
+        accessibilityLabel: filesVisible ? "Close files" : "Open files",
+        selected: filesVisible,
         icon: "folder",
-        onPress: handleOpenFilesInspector,
+        onPress: filesVisible ? toggleAuxiliaryPane : handleOpenFilesInspector,
       });
     }
     if (selectedThreadProject?.workspaceRoot) {
@@ -863,8 +869,89 @@ function ThreadRouteContent(
       }),
     );
   }, [navigation, routeThreadIdentity, selectedThreadCreation, selectedThreadProject]);
+  const setupTurnStartedAt = composer.selectedThreadActivityRun?.startedAt ?? null;
+  const { snapshot: worktreeSetupSnapshot, visible: worktreeSetup } = useWorktreeSetup({
+    environmentId: selectedThread?.environmentId ?? null,
+    threadId: selectedThread?.id ?? null,
+    preparing:
+      composer.selectedThreadActivityRun?.status === "preparing" ||
+      selectedThread?.runtime?.status === "preparing" ||
+      selectedThread?.worktreePath != null ||
+      (selectedThreadCreation?.message.creation?.workspaceMode === "worktree" &&
+        selectedThreadCreation.outcome == null),
+    turnStarted: setupTurnStartedAt !== null,
+    followUpSent:
+      composer.selectedThreadFeed.filter(
+        (entry) => entry.type === "message" && entry.message.role === "user",
+      ).length +
+        composer.selectedThreadQueueCount >
+      1,
+  });
   const awaitingBootstrapTurn =
-    selectedThreadDetail?.runs.some((run) => run.status === "preparing") ?? false;
+    worktreeSetup !== null
+      ? worktreeSetup.phase === "running" && !worktreeSetupAgentStarted(worktreeSetup)
+      : (selectedThreadDetail?.runs.some((run) => run.status === "preparing") ?? false);
+  const cancelWorktreeSetup = useAtomCommand(vcsEnvironment.cancelWorktreeSetup);
+  const handleCancelWorktreeSetup = useCallback(() => {
+    if (!selectedThread) return;
+    void cancelWorktreeSetup({
+      environmentId: selectedThread.environmentId,
+      input: { threadId: selectedThread.id },
+    });
+  }, [cancelWorktreeSetup, selectedThread]);
+  const startLocalThread = useAtomCommand(threadEnvironment.startTurn, "work locally");
+  const localResendBusy = useRef(false);
+  const setupMessage = selectedThreadDetail?.messages.find((message) => message.role === "user");
+  const handleWorkLocally = useCallback(async () => {
+    if (!selectedThread || !selectedThreadProject || !setupMessage || localResendBusy.current)
+      return;
+    localResendBusy.current = true;
+    try {
+      const result = await cancelWorktreeSetup({
+        environmentId: selectedThread.environmentId,
+        input: { threadId: selectedThread.id },
+      });
+      if (result._tag !== "Success" || !result.value.cancelled) return;
+      // V2 accepts the launch before setup runs, so cancellation never rejects
+      // the original outbox delivery. Reuse the server-owned prompt and uploads.
+      const metadata = makeTurnCommandMetadata();
+      const launched = await startLocalThread({
+        environmentId: selectedThread.environmentId,
+        input: buildProjectThreadStartTurnInput({
+          ...metadata,
+          projectId: selectedThread.projectId,
+          projectCwd: selectedThreadProject.workspaceRoot,
+          text: setupMessage.text,
+          ...(setupMessage.context ? { context: setupMessage.context } : {}),
+          uploadedAttachments: setupMessage.attachments,
+          modelSelection: selectedThread.modelSelection,
+          runtimeMode: selectedThread.runtimeMode,
+          interactionMode: selectedThread.interactionMode,
+          workspaceMode: "local",
+          branch: null,
+          worktreePath: null,
+          startFromOrigin: false,
+          worktreeBranchName: "",
+        }),
+      });
+      if (launched._tag !== "Success") return;
+      navigation.dispatch(
+        StackActions.replace("Thread", {
+          environmentId: String(selectedThread.environmentId),
+          threadId: metadata.threadId,
+        }),
+      );
+    } finally {
+      localResendBusy.current = false;
+    }
+  }, [
+    cancelWorktreeSetup,
+    navigation,
+    selectedThread,
+    selectedThreadProject,
+    setupMessage,
+    startLocalThread,
+  ]);
   const creationState = ((): ThreadDetailScreenProps["creationState"] => {
     if (selectedThreadCreation === null) {
       return awaitingBootstrapTurn ? { kind: "preparing", preparingWorktree: true } : null;
@@ -926,13 +1013,12 @@ function ThreadRouteContent(
       <GitActionProgressOverlay progress={gitActionProgress} onDismiss={dismissGitActionResult} />
 
       <View
-        className={materialYouStyleLayoutActive ? "flex-1 bg-thread-canvas" : "flex-1 bg-screen"}
+        className={Platform.OS === "android" ? "flex-1 bg-thread-canvas" : "flex-1 bg-screen"}
         style={
-          materialYouStyleLayoutActive
+          Platform.OS === "android"
             ? {
                 borderTopLeftRadius: 28,
                 borderTopRightRadius: 28,
-                marginRight: layout.usesSplitView ? 8 : 0,
                 overflow: "hidden",
               }
             : undefined
@@ -948,9 +1034,35 @@ function ThreadRouteContent(
           onDismissFeedback={composer.dismissFeedback}
           selectedThreadFeed={composer.selectedThreadFeed}
           activityRun={composer.selectedThreadActivityRun}
-          activeWorkStartedAt={composer.activeWorkStartedAt}
+          activeWorkStartedAt={
+            creationState?.kind === "preparing" ||
+            (worktreeSetup !== null && setupTurnStartedAt === null)
+              ? null
+              : composer.activeWorkStartedAt
+          }
           isCompacting={composer.isCompacting}
           creationState={creationState}
+          setupWorkingStartedAt={
+            composer.activeWorkStartedAt !== null &&
+            worktreeSetupSnapshot !== null &&
+            composer.selectedThreadFeed.filter(
+              (entry) => entry.type === "message" && entry.message.role === "user",
+            ).length <= 1
+              ? composer.activeWorkStartedAt
+              : null
+          }
+          worktreeSetup={
+            worktreeSetup
+              ? {
+                  snapshot: worktreeSetup,
+                  turnStartedAt: setupTurnStartedAt,
+                  working: composer.activeWorkStartedAt !== null,
+                  turnStarted: setupTurnStartedAt !== null,
+                  onCancel: handleCancelWorktreeSetup,
+                  onWorkLocally: setupMessage && selectedThreadProject ? handleWorkLocally : null,
+                }
+              : null
+          }
           activePendingApproval={requests.activePendingApproval}
           respondingApprovalId={requests.respondingApprovalId}
           activePendingUserInput={requests.activePendingUserInput}
@@ -963,7 +1075,7 @@ function ThreadRouteContent(
           threadSyncStatus={selectedThreadDetailState.status}
           historyControls={historyControls}
           activeThreadBusy={composer.activeThreadBusy}
-          canStopThread={composer.interruptibleRunId !== null}
+          canStopThread={awaitingBootstrapTurn || composer.interruptibleRunId !== null}
           queuedRunEdit={composer.queuedRunEdit}
           composerDraftKey={composer.composerDraftKey}
           followUpBehavior={composer.followUpBehavior}
@@ -987,9 +1099,10 @@ function ThreadRouteContent(
           onNativePasteText={composer.onNativePasteText}
           onRemoveDraftImage={composer.onRemoveDraftImage}
           serverConfig={serverConfig}
-          onStopThread={handleStopThread}
+          onStopThread={awaitingBootstrapTurn ? handleCancelWorktreeSetup : handleStopThread}
           onSendMessage={composer.onSendMessage}
           onReconnectEnvironment={handleReconnectEnvironment}
+          canSwitchThreadProvider={composer.canSwitchThreadProvider}
           onUpdateThreadModelSelection={composer.onUpdateModelSelection}
           onUpdateThreadRuntimeMode={composer.onUpdateRuntimeMode}
           onUpdateThreadInteractionMode={composer.onUpdateInteractionMode}
@@ -1041,9 +1154,7 @@ function ThreadRouteContent(
               : undefined,
           unstable_headerSubtitle: usesNativeHeaderGlass ? headerSubtitle : undefined,
           contentStyle:
-            Platform.OS === "android" && materialYouStyleLayoutActive
-              ? { backgroundColor: headerColor }
-              : undefined,
+            Platform.OS === "android" && true ? { backgroundColor: headerColor } : undefined,
         }}
       />
 
@@ -1051,6 +1162,21 @@ function ThreadRouteContent(
         <AndroidScreenHeader
           title={selectedThread.title}
           subtitle={headerSubtitle}
+          leading={<AndroidWorkspaceSidebarButton />}
+          trailing={
+            fileInspector.supported && selectedThreadCwd !== null ? (
+              <AndroidHeaderIconButton
+                accessibilityLabel={
+                  inspectorMode !== null && panes.auxiliaryPaneVisible
+                    ? "Hide inspector"
+                    : "Show inspector"
+                }
+                icon="sidebar.right"
+                selected={inspectorMode !== null && panes.auxiliaryPaneVisible}
+                onPress={handleToggleInspector}
+              />
+            ) : null
+          }
           onBack={
             layout.usesSplitView
               ? undefined
@@ -1062,7 +1188,7 @@ function ThreadRouteContent(
                 }
           }
           actions={androidHeaderActions}
-          hideBottomBorder={materialYouStyleLayoutActive}
+          hideBottomBorder
         />
       ) : null}
 

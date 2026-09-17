@@ -86,6 +86,7 @@ export interface BranchToolbarBranchSelectorHandle {
 }
 
 interface BranchToolbarBranchSelectorProps {
+  forceNewWorktree?: boolean;
   ref?: Ref<BranchToolbarBranchSelectorHandle>;
   className?: string;
   displayMode?: "toolbar" | "panel";
@@ -107,6 +108,7 @@ function toBranchActionErrorMessage(error: unknown): string {
 }
 
 export function BranchToolbarBranchSelector({
+  forceNewWorktree = false,
   ref,
   className,
   displayMode = "toolbar",
@@ -161,7 +163,9 @@ export function BranchToolbarBranchSelector({
     activeThreadBranchOverride !== undefined
       ? activeThreadBranchOverride
       : (serverThread?.branch ?? draftThread?.branch ?? null);
-  const activeWorktreePath = serverThread?.worktreePath ?? draftThread?.worktreePath ?? null;
+  const activeWorktreePath = forceNewWorktree
+    ? null
+    : (serverThread?.worktreePath ?? draftThread?.worktreePath ?? null);
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const branchCwd = activeWorktreePath ?? activeProjectCwd;
   const hasServerThread = serverThread !== null;
@@ -793,6 +797,7 @@ export function BranchToolbarBranchSelector({
           <ThreadPullRequestBadgeControl
             variant="ghost"
             badge={prBadge}
+            pullRequests={serverThread?.pullRequests ?? []}
             number={prNumber}
             url={prUrl}
             status={displayedPrStatus}

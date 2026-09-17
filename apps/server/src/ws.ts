@@ -1872,6 +1872,9 @@ const makeWsRpcLayer = (
                             : { messageId: input.initialMessage.messageId }),
                           text: input.initialMessage.text,
                           attachments: input.initialMessage.attachments,
+                          ...(input.initialMessage.context === undefined
+                            ? {}
+                            : { context: input.initialMessage.context }),
                         },
                       }),
                   createdBy: "user",
@@ -2555,6 +2558,12 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "pull-requests",
             },
           ),
+        [WS_METHODS.pullRequestsChecks]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.pullRequestsChecks,
+            withPullRequestViewer(input, pullRequests.checks(input)),
+            { "rpc.aggregate": "pull-requests" },
+          ),
         [WS_METHODS.pullRequestsActivity]: (input) =>
           observeRpcEffect(
             WS_METHODS.pullRequestsActivity,
@@ -2575,6 +2584,18 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.pullRequestsDiffFileContents,
             withPullRequestViewer(input, pullRequests.diffFileContents(input)),
+            { "rpc.aggregate": "pull-requests" },
+          ),
+        [WS_METHODS.pullRequestsFilesViewed]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.pullRequestsFilesViewed,
+            withPullRequestViewer(input, pullRequests.filesViewed(input)),
+            { "rpc.aggregate": "pull-requests" },
+          ),
+        [WS_METHODS.pullRequestsSetFilesViewed]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.pullRequestsSetFilesViewed,
+            withPullRequestViewer(input, pullRequests.setFilesViewed(input)),
             { "rpc.aggregate": "pull-requests" },
           ),
         [WS_METHODS.pullRequestsRunAction]: (input) =>
@@ -2646,11 +2667,11 @@ const makeWsRpcLayer = (
         [WS_METHODS.pullRequestsInvalidate]: (input) =>
           observeRpcEffect(
             WS_METHODS.pullRequestsInvalidate,
-            pullRequests.invalidate(input).pipe(
+            pullRequests.invalidate(input, { notifyReaders: true }).pipe(
               // A reader asking for fresh host state also wants the thread badges it feeds to
               // catch up, including a merged link the sweep would otherwise never revisit.
               Effect.andThen(
-                input.reference === undefined
+                input.reference === undefined || input.filesViewedOnly === true
                   ? Effect.void
                   : resolvePullRequestSyncKey(input.reference).pipe(
                       Effect.flatMap((key) =>

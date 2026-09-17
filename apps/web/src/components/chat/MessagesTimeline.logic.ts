@@ -1,3 +1,5 @@
+import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
+export { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import * as Equal from "effect/Equal";
 import { shallow } from "zustand/vanilla/shallow";
 import { renderCodexDirectivesForCopy } from "@t3tools/client-runtime/codex-markdown-directives";
@@ -63,6 +65,7 @@ function workEntryIsActiveTurnActivity(entry: WorkLogEntry): boolean {
 }
 
 function singleToolCallLabel(entry: WorkLogEntry): string {
+  if (entry.itemType === "reasoning") return "Thought";
   const toolPresentation = resolveWorkEntryToolPresentation(entry, "completed");
   if (toolPresentation) return toolPresentation.displayName;
   const command = entry.command?.trim();
@@ -98,6 +101,12 @@ export function liveWorkEntryLabel(
   active: boolean,
 ) {
   const status = liveActivityToolStatus(entry.toolLifecycleStatus, active);
+  if (entry.itemType === "reasoning") {
+    return (
+      entry.detail?.trim().replace(/\s+/g, " ") ||
+      (status === "inProgress" ? "Thinking" : "Thought")
+    );
+  }
   const toolPresentation = resolveWorkEntryToolPresentation({
     ...entry,
     toolLifecycleStatus: status,
@@ -124,6 +133,7 @@ export function workEntryIsVisibleInGroup(
   entry: WorkLogEntry,
   expandedToolGroupEntry = false,
 ): boolean {
+  if (entry.itemType === "reasoning") return Boolean(entry.detail?.trim());
   return (
     (expandedToolGroupEntry &&
       (entry.toolLifecycleStatus === "inProgress" ||
@@ -1532,11 +1542,6 @@ function attachCreatedThreadSummaries(
 }
 
 const WORKTREE_SETUP_ROW_ID = "worktree-setup-row";
-
-/** True once the bootstrap handed off to the agent (async setup script may still run). */
-export function worktreeSetupAgentStarted(snapshot: WorktreeSetupSnapshot): boolean {
-  return snapshot.stages.some((stage) => stage.id === "agent" && stage.status === "done");
-}
 
 type MessagesTimelineRowsInput = Parameters<typeof deriveMessagesTimelineRows>[0];
 

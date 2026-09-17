@@ -29,6 +29,7 @@ import {
   type MessagesTimelineRow,
   resolveTimelineToolPresentation,
   workEntryDisplayLabel,
+  workEntryIsVisibleInGroup,
 } from "./MessagesTimeline.logic";
 
 describe("expanded tool group scrolling", () => {
@@ -87,6 +88,39 @@ describe("work entry labels", () => {
     label: "Tool call",
     tone: "tool" as const,
   };
+
+  it("previews reasoning in the live row and falls back to a short label while empty", () => {
+    const thought = {
+      ...entry,
+      itemType: "reasoning" as const,
+      tone: "thinking" as const,
+      detail: "Check **ordering** first.",
+      toolLifecycleStatus: "inProgress" as const,
+    };
+    expect(liveWorkEntryLabel(thought, undefined, true)).toBe(thought.detail);
+    expect(
+      liveWorkEntryLabel(
+        { ...thought, detail: "First paragraph.\n\nSecond paragraph." },
+        undefined,
+        true,
+      ),
+    ).toBe("First paragraph. Second paragraph.");
+    expect(liveWorkEntryLabel({ ...thought, detail: "  " }, undefined, true)).toBe("Thinking");
+    expect(
+      liveWorkEntryLabel(
+        { ...thought, detail: "", toolLifecycleStatus: "completed" },
+        undefined,
+        false,
+      ),
+    ).toBe("Thought");
+    expect(
+      liveWorkEntryLabel({ ...thought, toolLifecycleStatus: "completed" }, undefined, false),
+    ).toBe(thought.detail);
+    expect(workEntryDisplayLabel(thought, undefined)).toBe(thought.detail);
+    expect(workEntryIsVisibleInGroup(thought)).toBe(true);
+    expect(workEntryIsVisibleInGroup({ ...thought, toolLifecycleStatus: "completed" })).toBe(true);
+    expect(workEntryIsVisibleInGroup({ ...thought, detail: "  " })).toBe(false);
+  });
 
   it.each([
     ["inProgress", "Clicking in the preview browser"],
