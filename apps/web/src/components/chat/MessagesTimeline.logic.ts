@@ -3,7 +3,10 @@ export { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setu
 import * as Equal from "effect/Equal";
 import { shallow } from "zustand/vanilla/shallow";
 import { renderCodexDirectivesForCopy } from "@t3tools/client-runtime/codex-markdown-directives";
-import { commandProgramName } from "@t3tools/client-runtime/work-log/command-label";
+import {
+  commandDisplayText,
+  commandProgramName,
+} from "@t3tools/client-runtime/work-log/command-label";
 import {
   liveActivityToolStatus,
   normalizeCompactToolLabel,
@@ -65,11 +68,11 @@ function workEntryIsActiveTurnActivity(entry: WorkLogEntry): boolean {
 }
 
 function singleToolCallLabel(entry: WorkLogEntry): string {
-  if (entry.itemType === "reasoning") return "Thought";
+  if (entry.itemType === "reasoning") return entry.detail?.trim().replace(/\s+/g, " ") || "Thought";
   const toolPresentation = resolveWorkEntryToolPresentation(entry, "completed");
   if (toolPresentation) return toolPresentation.displayName;
   const command = entry.command?.trim();
-  if (command) return command;
+  if (command) return commandDisplayText(command);
   const heading = normalizeCompactToolLabel(entry.toolTitle || entry.label);
   return `${heading.charAt(0).toUpperCase()}${heading.slice(1)}`;
 }
@@ -78,7 +81,7 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string
   if (entry.itemType === "system_notice") return entry.label;
   const toolPresentation = resolveWorkEntryToolPresentation(entry);
   if (toolPresentation) return toolPresentation.displayName;
-  if (entry.command) return entry.command;
+  if (entry.command) return commandDisplayText(entry.command);
   // Retrying providers keep their progress label; other diagnostics expose
   // the retained message instead of a generic error heading.
   const providerRetry =
@@ -350,7 +353,11 @@ export type TimelineLatestRun = Pick<
 
 const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
 
-export type MessagesTimelineRow =
+export type MessagesTimelineRow = MessagesTimelineRowContent & {
+  readonly continuesWorkLog?: boolean;
+};
+
+type MessagesTimelineRowContent =
   | {
       kind: "worktree-setup";
       id: string;
@@ -645,18 +652,25 @@ function timelineEntryFoldRunId(entry: TimelineEntry): RunId | null {
   return null;
 }
 
+/** A steer adds input to its existing turn, without creating a new header. */
+function timelineEntryStartsResponse(entry: TimelineEntry): boolean {
+  return (
+    (entry.kind === "message" &&
+      entry.message.role === "user" &&
+      entry.message.inputIntent !== "steer" &&
+      entry.message.inputIntent !== "promoted_queued_to_steer") ||
+    (entry.kind === "work" && entry.entry.itemType === "notification")
+  );
+}
+
 /**
  * A promptless provider restart replaces the native turn without adding a
- * user message. Keep every provider turn since the latest user message in one
- * visual response until the replacement turn settles. A steer has its own
- * user message; an automatic wake has a notification. Both start a new visual response.
+ * user message. Keep every provider turn since the initiating prompt in one
+ * visual response until the replacement turn settles. Steers keep that
+ * boundary; an automatic wake starts a new response with its notification.
  */
 function lastResponseBoundaryIndex(timelineEntries: ReadonlyArray<TimelineEntry>): number {
-  return timelineEntries.findLastIndex(
-    (entry) =>
-      (entry.kind === "message" && entry.message.role === "user") ||
-      (entry.kind === "work" && entry.entry.itemType === "notification"),
-  );
+  return timelineEntries.findLastIndex(timelineEntryStartsResponse);
 }
 
 function deriveActiveVisualResponseRunIds(input: {
@@ -722,16 +736,17 @@ function deriveTurnFolds(input: {
      * hold a single instantaneous commentary message.
      */
     startBoundary: string | null;
+    anchorEntryId: string;
   }
   const groupsByRunId = new Map<RunId, TurnGroup>();
 
-  let pendingUserBoundary: string | null = null;
-  for (const entry of input.timelineEntries) {
-    if (
-      (entry.kind === "message" && entry.message.role === "user") ||
-      (entry.kind === "work" && entry.entry.itemType === "notification")
-    ) {
-      pendingUserBoundary = entry.createdAt;
+  let pendingBoundary: { createdAt: string; anchorEntryId: string } | null = null;
+  for (const [index, entry] of input.timelineEntries.entries()) {
+    if (timelineEntryStartsResponse(entry)) {
+      const nextEntry = input.timelineEntries[index + 1];
+      pendingBoundary = nextEntry
+        ? { createdAt: entry.createdAt, anchorEntryId: nextEntry.id }
+        : null;
       continue;
     }
     const runId = timelineEntryFoldRunId(entry);
@@ -747,9 +762,10 @@ function deriveTurnFolds(input: {
         // Each user boundary starts at most one turn; a second turn after the
         // same user message (e.g. a steer-superseded continuation) falls back
         // to its own first entry.
-        startBoundary: pendingUserBoundary,
+        startBoundary: pendingBoundary?.createdAt ?? null,
+        anchorEntryId: pendingBoundary?.anchorEntryId ?? entry.id,
       };
-      pendingUserBoundary = null;
+      pendingBoundary = null;
       groupsByRunId.set(runId, group);
     }
     group.entries.push(entry);
@@ -839,10 +855,10 @@ function deriveTurnFolds(input: {
         ? `Worked for ${duration}`
         : "Worked";
 
-    foldsByAnchorEntryId.set(firstEntry.id, {
+    foldsByAnchorEntryId.set(group.anchorEntryId, {
       runId,
-      anchorEntryId: firstEntry.id,
-      createdAt: firstEntry.createdAt,
+      anchorEntryId: group.anchorEntryId,
+      createdAt: group.startBoundary ?? firstEntry.createdAt,
       hiddenEntryIds,
       label,
     });
@@ -1013,18 +1029,9 @@ export function deriveMessagesTimelineRows(input: {
 
   // A steer continues the current turn. Keep its elapsed-time header below
   // the initiating prompt (or automatic wake), rather than moving it down.
-  let activeTurnHeaderIndex = input.timelineEntries.length;
-  if (input.isWorking) {
-    activeTurnHeaderIndex =
-      input.timelineEntries.findLastIndex(
-        (entry) =>
-          (entry.kind === "message" &&
-            entry.message.role === "user" &&
-            entry.message.inputIntent !== "steer" &&
-            entry.message.inputIntent !== "promoted_queued_to_steer") ||
-          (entry.kind === "work" && entry.entry.itemType === "notification"),
-      ) + 1;
-  }
+  const activeTurnHeaderIndex = input.isWorking
+    ? lastResponseBoundaryIndex(input.timelineEntries) + 1
+    : input.timelineEntries.length;
 
   // Contiguous trailing work entries of the active run collapse into one live
   // row that survives between actions: while a tool runs it shows that tool,
@@ -1487,8 +1494,25 @@ export function deriveMessagesTimelineRows(input: {
     });
   }
 
-  return attachTrailingToolGroupsToAssistant(
+  const result = attachTrailingToolGroupsToAssistant(
     attachCreatedThreadSummaries(nextRows, input.timelineEntries),
+  );
+  return result.map((row, index) =>
+    timelineRowIsWorkLog(row) && timelineRowIsWorkLog(result[index + 1])
+      ? { ...row, continuesWorkLog: true }
+      : row,
+  );
+}
+
+/** Adjacent work stays one visual list even when virtualization splits its groups. */
+function timelineRowIsWorkLog(row: MessagesTimelineRow | undefined): boolean {
+  return (
+    row !== undefined &&
+    (row.kind === "work" ||
+      row.kind === "work-toggle" ||
+      row.kind === "work-live" ||
+      row.kind === "thinking" ||
+      (row.kind === "event" && row.projectedItem.item.type === "subagent"))
   );
 }
 

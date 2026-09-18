@@ -78,7 +78,7 @@ const OrchestratorMcpTargetOptionsFromRecord = Schema.Record(
 ).pipe(
   Schema.decodeTo(
     Schema.Array(ProviderOptionSelection),
-    SchemaTransformation.transformOrFail({
+    SchemaTransformation.transformEffect({
       decode: (record) =>
         Effect.succeed(Object.entries(record).map(([id, value]) => ({ id, value }))),
       encode: (selections: ReadonlyArray<ProviderOptionSelection>) =>
@@ -272,16 +272,6 @@ export const OrchestratorMcpCreateThreadsResult = Schema.Struct({
   threads: Schema.Array(OrchestratorMcpCreatedThread),
 });
 export type OrchestratorMcpCreateThreadsResult = typeof OrchestratorMcpCreateThreadsResult.Type;
-
-export const OrchestratorMcpThreadStartInput = Schema.Struct({
-  prompt: OrchestratorMcpPrompt,
-  title: Schema.optional(OrchestratorMcpTitle),
-  target: Schema.optional(OrchestratorMcpTarget),
-  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
-  runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
-  interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
-});
-export type OrchestratorMcpThreadStartInput = typeof OrchestratorMcpThreadStartInput.Type;
 
 export const OrchestratorMcpThreadStatus = Schema.Union([
   Schema.Literal("idle"),

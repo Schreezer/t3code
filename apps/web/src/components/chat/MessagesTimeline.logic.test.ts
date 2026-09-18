@@ -185,7 +185,10 @@ describe("work entry labels", () => {
     const commandEntry = { ...entry, command };
     expect(liveWorkEntryLabel(commandEntry, undefined, true)).toBe("Running vp");
     expect(liveWorkEntryLabel(commandEntry, undefined, false)).toBe("Ran vp");
-    expect(workEntryDisplayLabel(commandEntry, undefined)).toBe(command);
+    expect(workEntryDisplayLabel(commandEntry, undefined)).toBe(
+      "vp test run apps/web/src/session-logic.test.ts",
+    );
+    expect(commandEntry.command).toBe(command);
   });
 
   it.each([
@@ -1423,6 +1426,83 @@ describe("deriveMessagesTimelineRows", () => {
       timelineEntries.push(prompt(`steer-${index}`, "steer"));
     }
   });
+
+  it.each(["steer", "promoted_queued_to_steer"] as const)(
+    "keeps the duration header at the initiating prompt when %s arrives before output",
+    (inputIntent) => {
+      const runId = RunId.make("steered-run");
+      const time = (second: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString();
+      const prompt = (id: string, second: number, intent: "turn_start" | typeof inputIntent) => ({
+        kind: "message" as const,
+        id,
+        createdAt: time(second),
+        message: {
+          id: MessageId.make(id),
+          role: "user" as const,
+          text: id,
+          runId,
+          inputIntent: intent,
+          createdAt: time(second),
+          updatedAt: time(second),
+          streaming: false,
+        },
+      });
+      const entries = [prompt("initial-prompt", 0, "turn_start"), prompt("steer", 5, inputIntent)];
+      const work = {
+        kind: "work" as const,
+        id: "work",
+        createdAt: time(8),
+        entry: {
+          id: "work",
+          createdAt: time(8),
+          runId,
+          label: "Ran command",
+          tone: "tool" as const,
+        },
+      };
+      const final = {
+        kind: "message" as const,
+        id: "final",
+        createdAt: time(20),
+        message: {
+          id: MessageId.make("final"),
+          role: "assistant" as const,
+          text: "Done",
+          runId,
+          createdAt: time(20),
+          updatedAt: time(20),
+          streaming: false,
+        },
+      };
+      for (const isWorking of [true, false]) {
+        for (const expanded of [true, false]) {
+          const rows = deriveMessagesTimelineRows({
+            timelineEntries: [...entries, work, final],
+            latestRun: {
+              runId,
+              status: isWorking ? "running" : "completed",
+              startedAt: time(0),
+              completedAt: isWorking ? null : time(20),
+            },
+            isWorking,
+            activeTurnStartedAt: time(0),
+            expandedRunIds: expanded ? new Set([runId]) : new Set(),
+            turnDiffSummaries: [],
+            supportsConversationRollback: false,
+          });
+          expect(rows.slice(0, 3).map((row) => row.id)).toEqual([
+            "initial-prompt",
+            isWorking ? "working-indicator-row" : `turn-fold:${runId}`,
+            "steer",
+          ]);
+          expect(rows[1]?.createdAt).toBe(time(0));
+          if (!isWorking) expect(rows[1]).toMatchObject({ label: "Worked for 20s", expanded });
+          expect(rows.some((row) => row.id === "final")).toBe(true);
+          expect(rows.some((row) => row.id === "work")).toBe(isWorking || expanded);
+        }
+      }
+    },
+  );
 
   it("keeps the previous turn folded while a newly sent message awaits its turn", () => {
     // Right after send, isWorking is true but latestRun still points at the
@@ -3529,6 +3609,49 @@ describe("linked timeline resources", () => {
     projectedItem: { item: { id, type, runId: eventRunId } } as OrchestrationV2ProjectedTurnItem,
   });
   const common = { isWorking: false, turnDiffSummaries: [], supportsConversationRollback: false };
+
+  it("previews a thought and joins adjacent worklogs without removing message boundaries", () => {
+    const rows = deriveMessagesTimelineRows({
+      ...common,
+      timelineEntries: [
+        {
+          kind: "work",
+          id: "thought",
+          createdAt: "2026-09-08T10:00:01Z",
+          entry: {
+            id: "thought",
+            runId,
+            createdAt: "2026-09-08T10:00:01Z",
+            label: "Thought",
+            itemType: "reasoning",
+            tone: "thinking",
+            detail: "First paragraph.\n\nSecond paragraph.",
+          },
+        },
+        event("child", "subagent"),
+        {
+          kind: "message",
+          id: "answer",
+          createdAt: "2026-09-08T10:00:03Z",
+          message: {
+            id: MessageId.make("answer"),
+            role: "assistant",
+            text: "Done",
+            runId,
+            streaming: false,
+            createdAt: "2026-09-08T10:00:03Z",
+            updatedAt: "2026-09-08T10:00:03Z",
+          },
+        },
+      ],
+      expandedRunIds: new Set([runId]),
+    });
+    expect(rows.find((row) => row.kind === "work")).toMatchObject({
+      displayLabel: "First paragraph. Second paragraph.",
+      continuesWorkLog: true,
+    });
+    expect(rows.find((row) => row.id === "child")?.continuesWorkLog).toBeUndefined();
+  });
 
   it("groups adjacent subagents without merging across a resource or run boundary", () => {
     const rows = deriveMessagesTimelineRows({
