@@ -11,14 +11,7 @@ import { Button } from "../ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../ui/empty";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import {
-  Select,
-  SelectItem,
-  SelectPopup,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SidebarInset } from "../ui/sidebar";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -485,7 +478,7 @@ export function BoardView() {
                     {app.name}
                   </SelectItem>
                 ))}
-                <SelectSeparator />
+                <div aria-hidden className="mx-2 my-1 h-px bg-border" />
                 <SelectItem value={ADD_APP_VALUE}>Add app…</SelectItem>
               </SelectPopup>
             </Select>

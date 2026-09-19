@@ -170,8 +170,9 @@ export const make = Effect.gen(function* () {
   // only Windows writes them into the registry command. Development there runs
   // Electron against a script, so the launch arguments must ride along or the
   // OS would start a bare Electron with no app.
+  // Claimed unconditionally on every launch: Electron dropped the matching
+  // read side, and re-registering an already-registered scheme is a no-op.
   const claimProtocolClient = Effect.gen(function* () {
-    if (yield* electronApp.isDefaultProtocolClient(scheme)) return;
     const claimed = environment.isPackaged
       ? yield* electronApp.setAsDefaultProtocolClient(scheme)
       : yield* electronApp.setAsDefaultProtocolClient(

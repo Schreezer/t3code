@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { Sheet, SheetHeader, SheetPanel, SheetPopup, SheetTitle } from "../ui/sheet";
+import { ScrollArea } from "../ui/scroll-area";
+import { Sheet, SheetHeader, SheetPopup, SheetTitle } from "../ui/sheet";
 import { Spinner } from "../ui/spinner";
 import { selectableBoardStages } from "./boardLogic";
 import type { BoardCardDetail, BoardStage, BoardStageId } from "./boardTypes";
@@ -99,109 +100,111 @@ export function BoardCardDrawer(props: {
             </p>
           ) : null}
         </SheetHeader>
-        <SheetPanel className="flex flex-col gap-5">
-          {loadError ? (
-            <p className="text-sm text-destructive-foreground">{loadError}</p>
-          ) : detail === null || card === null ? (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Spinner className="size-4" />
-              Loading card…
-            </div>
-          ) : (
-            <>
-              <DrawerSection title="Move to…">
-                <Select
-                  value=""
-                  onValueChange={(value) => {
-                    if (typeof value === "string" && value.length > 0) {
-                      props.onMove(card.id, value);
-                    }
-                  }}
-                >
-                  <SelectTrigger size="sm" aria-label="Move card to stage">
-                    <SelectValue placeholder="Choose a stage">Choose a stage</SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {selectableBoardStages(props.stages, card.stage).map((stage) => (
-                      <SelectItem key={stage.id} value={stage.id}>
-                        {stage.label}
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
-              </DrawerSection>
-
-              <DrawerSection title="Body">
-                {card.bodyMd.trim().length > 0 ? (
-                  <Prose text={card.bodyMd} />
-                ) : (
-                  <p className="text-sm text-muted-foreground">No description.</p>
-                )}
-              </DrawerSection>
-
-              {card.planMd ? (
-                <DrawerSection title="Plan">
-                  <Prose text={card.planMd} />
+        <ScrollArea scrollFade>
+          <div className="flex flex-col gap-5 p-6 pt-1">
+            {loadError ? (
+              <p className="text-sm text-destructive-foreground">{loadError}</p>
+            ) : detail === null || card === null ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Spinner className="size-4" />
+                Loading card…
+              </div>
+            ) : (
+              <>
+                <DrawerSection title="Move to…">
+                  <Select
+                    value=""
+                    onValueChange={(value) => {
+                      if (typeof value === "string" && value.length > 0) {
+                        props.onMove(card.id, value);
+                      }
+                    }}
+                  >
+                    <SelectTrigger size="sm" aria-label="Move card to stage">
+                      <SelectValue placeholder="Choose a stage">Choose a stage</SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup>
+                      {selectableBoardStages(props.stages, card.stage).map((stage) => (
+                        <SelectItem key={stage.id} value={stage.id}>
+                          {stage.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
                 </DrawerSection>
-              ) : null}
 
-              <DrawerSection title="Threads">
-                {card.threads.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No linked threads.</p>
-                ) : (
-                  <ul className="flex flex-col gap-2">
-                    {card.threads.map((thread) => (
-                      <li
-                        key={thread.threadId}
-                        className="flex flex-col gap-1 rounded-lg border p-2.5"
-                      >
-                        <span className="truncate font-mono text-xs text-foreground">
-                          {thread.threadId}
-                        </span>
-                        <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                          <Badge size="sm" variant="secondary">
-                            {thread.role}
-                          </Badge>
-                          {thread.state ? thread.state.status : "not observed"}
-                          {thread.state?.branch ? ` · ${thread.state.branch}` : ""}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </DrawerSection>
+                <DrawerSection title="Body">
+                  {card.bodyMd.trim().length > 0 ? (
+                    <Prose text={card.bodyMd} />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No description.</p>
+                  )}
+                </DrawerSection>
 
-              <DrawerSection title="Stage events">
-                {detail.events.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No stage changes yet.</p>
-                ) : (
-                  <ul className="flex flex-col">
-                    {detail.events.map((event) => (
-                      <li
-                        key={`${event.at}-${event.actor}-${event.fromStage ?? ""}-${event.toStage}`}
-                        className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-2 border-b py-1.5 font-mono text-[11px] text-muted-foreground last:border-b-0"
-                      >
-                        <span
-                          className={cn(
-                            "font-semibold",
-                            ACTOR_CLASS_NAME[event.actor] ?? "text-muted-foreground",
-                          )}
+                {card.planMd ? (
+                  <DrawerSection title="Plan">
+                    <Prose text={card.planMd} />
+                  </DrawerSection>
+                ) : null}
+
+                <DrawerSection title="Threads">
+                  {card.threads.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No linked threads.</p>
+                  ) : (
+                    <ul className="flex flex-col gap-2">
+                      {card.threads.map((thread) => (
+                        <li
+                          key={thread.threadId}
+                          className="flex flex-col gap-1 rounded-lg border p-2.5"
                         >
-                          {event.actor}
-                        </span>
-                        <span className="break-words">
-                          {`${event.fromStage ? `${stageLabel(event.fromStage)} → ` : ""}${stageLabel(event.toStage)}${
-                            event.note ? `  (${event.note})` : ""
-                          }`}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </DrawerSection>
-            </>
-          )}
-        </SheetPanel>
+                          <span className="truncate font-mono text-xs text-foreground">
+                            {thread.threadId}
+                          </span>
+                          <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <Badge size="sm" variant="secondary">
+                              {thread.role}
+                            </Badge>
+                            {thread.state ? thread.state.status : "not observed"}
+                            {thread.state?.branch ? ` · ${thread.state.branch}` : ""}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </DrawerSection>
+
+                <DrawerSection title="Stage events">
+                  {detail.events.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No stage changes yet.</p>
+                  ) : (
+                    <ul className="flex flex-col">
+                      {detail.events.map((event) => (
+                        <li
+                          key={`${event.at}-${event.actor}-${event.fromStage ?? ""}-${event.toStage}`}
+                          className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-2 border-b py-1.5 font-mono text-[11px] text-muted-foreground last:border-b-0"
+                        >
+                          <span
+                            className={cn(
+                              "font-semibold",
+                              ACTOR_CLASS_NAME[event.actor] ?? "text-muted-foreground",
+                            )}
+                          >
+                            {event.actor}
+                          </span>
+                          <span className="break-words">
+                            {`${event.fromStage ? `${stageLabel(event.fromStage)} → ` : ""}${stageLabel(event.toStage)}${
+                              event.note ? `  (${event.note})` : ""
+                            }`}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </DrawerSection>
+              </>
+            )}
+          </div>
+        </ScrollArea>
       </SheetPopup>
     </Sheet>
   );
