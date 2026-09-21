@@ -1,3 +1,7 @@
+import { ThreadHoverCardPopup } from "../ThreadHoverCard";
+import { AgentElapsed } from "./AgentElapsed";
+import { projectedSubagentsToRuntime } from "@t3tools/client-runtime/state/subagentRuntime";
+import type { ReactNode } from "react";
 import { useThreadShell, useProject } from "../../state/entities";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { useAtomValue } from "@effect/atom-react";
@@ -32,7 +36,8 @@ import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
 import { getProviderInstanceEntry } from "../../providerInstances";
 import { formatShortTimestamp } from "../../timestampFormat";
 import { getTriggerDisplayModelName } from "./providerIconUtils";
-import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import { ProviderInstanceIcon, providerTextColorClassName } from "./ProviderInstanceIcon";
+import { cn } from "~/lib/utils";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
 import { Button, InlineButton } from "../ui/button";
 import { T3Wordmark } from "../T3Wordmark";
@@ -266,21 +271,22 @@ function SubagentTimelineLink(props: {
           )
         }
       />
-      <TooltipPopup>
+      <ThreadHoverCardPopup>
         <SubagentTimelineTooltip
           {...props}
+          elapsed={agent ? <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} /> : null}
           model={agent?.model ?? null}
           status={agent?.status ?? props.status}
           result={agent?.result ?? props.result}
           progress={agent?.progress ?? props.progress}
         />
-      </TooltipPopup>
+      </ThreadHoverCardPopup>
     </Tooltip>
   );
 }
 
 function SubagentTimelineTooltip(
-  props: Parameters<typeof SubagentTimelineLink>[0] & { model: string | null },
+  props: Parameters<typeof SubagentTimelineLink>[0] & { model: string | null; elapsed: ReactNode },
 ) {
   const environmentId = props.parentRef.environmentId;
   const parent = useThreadShell(props.parentRef)?.source;
@@ -296,6 +302,8 @@ function SubagentTimelineTooltip(
       title={formatSubagentDisplayTitle(child?.title ?? props.title)}
       model={props.model}
       provider={props.provider}
+      driver={props.driver}
+      elapsed={props.elapsed}
       status={props.status}
       result={props.result}
       progress={props.progress}
@@ -339,7 +347,16 @@ function HandoffEndpoint(props: {
               acpRegistryIconUrl={entry?.acpRegistryIconUrl}
               iconClassName="size-3"
             />
-            <span className="truncate">{label}</span>
+            <span
+              className={cn(
+                "truncate font-medium",
+                providerTextColorClassName(
+                  entry?.driverKind ?? ProviderDriverKind.make(props.instanceId),
+                ),
+              )}
+            >
+              {label}
+            </span>
           </span>
         }
       />
