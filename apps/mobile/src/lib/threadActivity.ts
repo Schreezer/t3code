@@ -24,6 +24,7 @@ import {
   type WorkLogToolLifecycleStatus,
 } from "@t3tools/client-runtime/work-log/presentation";
 import {
+  resolveT3McpToolDefinition,
   resolveT3McpToolPresentation,
   type T3McpToolLogo,
   type T3McpToolPresentation,
@@ -46,6 +47,7 @@ import type {
 } from "@t3tools/contracts";
 import { ThreadId } from "@t3tools/contracts";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import { compactDynamicToolOutput } from "@t3tools/shared/toolOutput";
 import * as DateTime from "effect/DateTime";
 
 export type PendingApproval = ThreadPendingApproval;
@@ -107,6 +109,7 @@ export interface ThreadFeedMessage {
   readonly createdBy?: OrchestrationV2Actor;
   readonly creationSource?: OrchestrationV2CreationSource;
   readonly scheduledTaskId?: ScheduledTaskId;
+  readonly senderThreadId?: ThreadId;
   readonly visibility: OrchestrationV2ProjectedTurnItem["visibility"];
   readonly sourceThreadId: ThreadId;
   readonly createdAt: string;
@@ -712,6 +715,15 @@ function isEmptyMessage(entry: RawThreadFeedEntry): boolean {
 }
 
 function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): ThreadFeedEntry[] {
+  const childrenByRun = new Map<RunId, Set<string>>();
+  for (const entry of entries) {
+    if (entry.type !== "activity") continue;
+    const item = entry.activity.projectedItem.item;
+    if (item.type !== "subagent" || item.origin !== "app_owned" || item.runId === null) continue;
+    const children = childrenByRun.get(item.runId) ?? new Set<string>();
+    children.add(item.subagentId);
+    childrenByRun.set(item.runId, children);
+  }
   const grouped: ThreadFeedEntry[] = [];
   let firstActivityEntry: Extract<RawThreadFeedEntry, { readonly type: "activity" }> | null = null;
   let openGroupActivities: ThreadFeedActivity[] = [];
@@ -740,6 +752,26 @@ function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): Th
   };
 
   for (const entry of entries) {
+    // A successful delegation is already represented by its durable child card.
+    // Pending, failed and unmatched calls remain visible, even with identical prompts.
+    if (entry.type === "activity") {
+      const item = entry.activity.projectedItem.item;
+      if (
+        item.type === "dynamic_tool" &&
+        item.runId !== null &&
+        (item.status === "running" || item.status === "completed") &&
+        resolveT3McpToolDefinition(item.toolName)?.summaryAction === "delegate" &&
+        !workEntryDisplayIndicatesToolFailure(entry.activity.workEntry)
+      ) {
+        const output = compactDynamicToolOutput(item.output);
+        if (
+          !output?.isError &&
+          output?.taskId !== undefined &&
+          childrenByRun.get(item.runId)?.has(output.taskId)
+        )
+          continue;
+      }
+    }
     // Skip empty messages so they don't break activity grouping.
     if (isEmptyMessage(entry)) {
       continue;
@@ -761,6 +793,9 @@ function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): Th
       (entry.activity.projectedItem.item.type === "subagent") !==
         (firstActivityEntry?.activity.projectedItem.item.type === "subagent") ||
       firstActivityEntry?.runId !== entry.runId ||
+      (entry.activity.projectedItem.item.type === "subagent" &&
+        firstActivityEntry?.activity.projectedItem.item.providerTurnId !==
+          entry.activity.projectedItem.item.providerTurnId) ||
       (entry.activity.projectedItem.item.type !== "subagent" &&
         firstActivityEntry?.activity.attemptId !== entry.activity.attemptId)
     ) {
@@ -1100,7 +1135,10 @@ function isWorkLogFeedRow(row: ThreadFeedEntry | undefined): boolean {
         !isContextCompactionActivityGroup(row) &&
         !isContextHandoffActivityGroup(row) &&
         row.activities.every(
-          (activity) => !activity.prominent && activity.projectedItem.item.type !== "notification",
+          (activity) =>
+            !activity.prominent &&
+            activity.projectedItem.item.type !== "notification" &&
+            activity.projectedItem.item.type !== "subagent",
         )))
   );
 }
@@ -1522,6 +1560,7 @@ export function buildThreadFeed(
                 createdBy: item.createdBy,
                 creationSource: item.creationSource,
                 ...(item.scheduledTaskId ? { scheduledTaskId: item.scheduledTaskId } : {}),
+                ...(item.senderThreadId ? { senderThreadId: item.senderThreadId } : {}),
               }
             : {}),
           visibility: row.visibility,
