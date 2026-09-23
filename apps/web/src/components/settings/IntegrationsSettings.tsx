@@ -305,7 +305,7 @@ function BrowserViewportSetting({ disabled }: { readonly disabled: boolean }) {
             >
               <SelectValue>{viewportSelectLabel(viewport)}</SelectValue>
             </SelectTrigger>
-            <SelectPopup align="end" alignItemWithTrigger={false} className="min-w-64">
+            <SelectPopup align="end" alignItemWithTrigger={false}>
               <SelectItem value={FILL_VALUE}>Fill panel</SelectItem>
               <SelectItem value={RESPONSIVE_VALUE}>Responsive</SelectItem>
               <SelectGroup>
@@ -643,7 +643,9 @@ function DeviceIntegrationControls({
   );
   const configure = useAtomCommand(deviceEnvironment.configure, { reportFailure: false });
   const list = useAtomCommand(deviceEnvironment.list, { reportFailure: false });
-  const [pending, setPending] = useState<"hub" | "check" | "agent" | null>(null);
+  const [pending, setPending] = useState<
+    "hub" | "check" | "agent" | "update-hub" | "update-agent" | null
+  >(null);
   const busy = state.hostStatus === "installing" || state.hostStatus === "starting";
   const [platformsRevealed, setPlatformsRevealed] = useState(false);
   // Keep diagnostics visible through subsequent agent setup and refresh phases.
@@ -686,20 +688,64 @@ function DeviceIntegrationControls({
     }
   };
 
-  const checkVersions = state.supportsToolInspection ? (
-    <Button
-      size="sm"
-      variant="outline"
-      disabled={!environmentId || pending !== null || busy}
-      onClick={() => {
-        if (!environmentId) return;
-        setPending("check");
-        void list({ environmentId, input: { inspectOnly: true } }).finally(() => setPending(null));
-      }}
-    >
-      {pending === "check" ? "Checking…" : "Check versions"}
-    </Button>
-  ) : null;
+  const [updateError, setUpdateError] = useState<{ tool: "hub" | "agent"; message: string } | null>(
+    null,
+  );
+  const localTools = state.hosts.find((host) => host.kind === "local")?.tools;
+  const versionActions = (tool: "hub" | "agent") => {
+    const version = localTools?.[tool];
+    const needsUpdate = version && !version.installedVersions.includes(version.requiredVersion);
+    return (
+      <div className="space-y-2">
+        <div className="flex flex-wrap gap-2">
+          {state.supportsToolUpdate && needsUpdate ? (
+            <Button
+              size="sm"
+              disabled={!environmentId || pending !== null || busy}
+              onClick={() => {
+                if (!environmentId) return;
+                setUpdateError(null);
+                setPending(`update-${tool}`);
+                void list({ environmentId, input: { updateTool: tool } })
+                  .then((result) => {
+                    if (result._tag === "Failure")
+                      setUpdateError({
+                        tool,
+                        message:
+                          "Update failed. Check this host's network connection and try again.",
+                      });
+                  })
+                  .finally(() => setPending(null));
+              }}
+            >
+              {pending === `update-${tool}` ? "Updating…" : `Update to v${version.requiredVersion}`}
+            </Button>
+          ) : null}
+          {state.supportsToolInspection ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!environmentId || pending !== null || busy}
+              onClick={() => {
+                if (!environmentId) return;
+                setPending("check");
+                void list({ environmentId, input: { inspectOnly: true } }).finally(() =>
+                  setPending(null),
+                );
+              }}
+            >
+              {pending === "check" ? "Checking…" : "Check versions"}
+            </Button>
+          ) : null}
+        </div>
+        {updateError?.tool === tool ? (
+          <p role="alert" className="text-xs text-destructive">
+            {updateError.message}
+          </p>
+        ) : null}
+      </div>
+    );
+  };
 
   return (
     <>
@@ -711,7 +757,7 @@ function DeviceIntegrationControls({
         control={
           <>
             <DeviceToolVersions
-              action={checkVersions}
+              action={versionActions("hub")}
               kind="hub"
               tools={state.hosts.find((host) => host.kind === "local")?.tools}
             />
@@ -775,7 +821,7 @@ function DeviceIntegrationControls({
         control={
           <>
             <DeviceToolVersions
-              action={checkVersions}
+              action={versionActions("agent")}
               kind="agent"
               tools={state.hosts.find((host) => host.kind === "local")?.tools}
             />
@@ -1138,7 +1184,7 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
             <PlusIcon />
             Add profile
           </MenuTrigger>
-          <MenuPopup align="end" className="min-w-56">
+          <MenuPopup align="end">
             <MenuItem
               disabled={!settingsHydrated || atProfileLimit}
               onClick={() => createProfile("New profile")}
@@ -1233,14 +1279,11 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
                     onCommit={(next) => renameProfile(profile.id, next)}
                   />
                 )}
-                {/*
-                  Dimmed with the rest of the row: a `Badge` has no disabled
-                  treatment of its own, so a solid `bg-primary` pill would
-                  otherwise sit at full strength beside a name, rename field
-                  and menu button that are all at 0.64.
-                */}
+                {/* Dimmed with the rest of the row, whose controls are all disabled. */}
                 {isDefault ? (
-                  <Badge className={cn(profileWritesDisabled && "opacity-64")}>Default</Badge>
+                  <span className={cn("flex", profileWritesDisabled && "opacity-64")}>
+                    <Badge>Default</Badge>
+                  </span>
                 ) : null}
               </span>
               <Menu>
@@ -1256,7 +1299,7 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
                 >
                   <MoreVertical />
                 </MenuTrigger>
-                <MenuPopup align="end" className="min-w-44">
+                <MenuPopup align="end">
                   <MenuItem
                     disabled={!settingsHydrated || isDefault}
                     onClick={() => {

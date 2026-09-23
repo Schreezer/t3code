@@ -99,6 +99,19 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
     label: "Antigravity",
     settingsSchema: AntigravitySettings,
   },
+  {
+    value: ProviderDriverKind.make("pi"),
+    label: "Pi",
+    badgeLabel: "Early Access",
+    settingsSchema: PiSettings,
+  },
+  {
+    value: ProviderDriverKind.make("acpRegistry"),
+    label: "ACP Registry",
+    badgeLabel: "Early Access",
+    settingsSchema: AcpRegistrySettings,
+    hasDefaultInstance: false,
+  },
 ];
 
 const PROVIDER_CLIENT_DEFINITION_BY_VALUE: Partial<
