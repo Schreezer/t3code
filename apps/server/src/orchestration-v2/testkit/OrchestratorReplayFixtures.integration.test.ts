@@ -85,7 +85,8 @@ const runFixtureProvider = Effect.fn("runOrchestratorReplayFixture")(function* <
     transcriptEntriesThroughLabel(rawTranscript, input.driver.transcriptEntriesThroughLabel),
     { driver: input.driver.driver, model: input.driver.modelSelection.model },
   );
-  const workspace = yield* checkpointWorkspace(input.fixtureName);
+  const fixtureInput = input.buildInput();
+  const workspace = yield* checkpointWorkspace(input.fixtureName, fixtureInput.workspaceFiles);
   const transcript = yield* input.harness.decodeTranscript(
     input.driver.driver === "codex"
       ? materializeReplayTranscriptWorkspace(replayTranscript, workspace)
@@ -93,7 +94,7 @@ const runFixtureProvider = Effect.fn("runOrchestratorReplayFixture")(function* <
   );
   const materialized = yield* materializeFixtureInput({
     scenario: input.fixtureName,
-    fixtureInput: input.buildInput(),
+    fixtureInput,
     driver: input.driver.driver,
     modelSelection: input.driver.modelSelection,
   }).pipe(Effect.provide(idAllocatorLayer), provideDeterministicTestRuntime);
@@ -109,9 +110,11 @@ const runFixtureProvider = Effect.fn("runOrchestratorReplayFixture")(function* <
     },
   };
 
-  const result = yield* runOrchestratorV2ProviderReplayScenario(scenario, input.harness).pipe(
-    provideDeterministicTestRuntime,
-  );
+  const result = yield* runOrchestratorV2ProviderReplayScenario(
+    scenario,
+    input.harness,
+    input.driver.runContinuationWorker === true ? { runContinuationWorker: true } : {},
+  ).pipe(provideDeterministicTestRuntime);
   input.driver.assertOutput(result, transcript);
   const expectedAbsentWorkspacePaths = input.driver.expectedAbsentWorkspacePaths;
   if (expectedAbsentWorkspacePaths !== undefined) {

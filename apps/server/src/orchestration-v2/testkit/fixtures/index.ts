@@ -1,5 +1,7 @@
 import { ProviderDriverKind } from "@t3tools/contracts";
 
+import { claudeBackgroundSubagentAfterRootInput } from "./claude_background_subagent_after_root/input.ts";
+import { assertClaudeBackgroundSubagentAfterRootOutput } from "./claude_background_subagent_after_root/output.ts";
 import { claudeBackgroundTaskAfterRootInput } from "./claude_background_task_after_root/input.ts";
 import { assertClaudeBackgroundTaskAfterRootOutput } from "./claude_background_task_after_root/output.ts";
 import { claudeIdleResumeInput } from "./claude_idle_resume/input.ts";
@@ -33,6 +35,8 @@ import { queuedCancelledWhileActiveInput } from "./queued_cancelled_while_active
 import { assertQueuedTurnOutput } from "./queued_turn/codex_output.ts";
 import { queuedTurnInput } from "./queued_turn/input.ts";
 import { assertSimpleClaudeOutput } from "./simple/claude_output.ts";
+import { assertSkillInvocationCursorOutput } from "./skill_invocation/cursor_output.ts";
+import { skillInvocationInput } from "./skill_invocation/input.ts";
 import { assertSimpleOutput } from "./simple/codex_output.ts";
 import { simpleInput } from "./simple/input.ts";
 import { assertSubagentOutput } from "./subagent/codex_output.ts";
@@ -96,6 +100,22 @@ import {
 } from "./shared.ts";
 
 export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixture> = [
+  {
+    name: "claude_background_subagent_after_root",
+    buildInput: claudeBackgroundSubagentAfterRootInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        transcriptFile: new URL(
+          "./claude_background_subagent_after_root/claude_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: CLAUDE_MODEL_SELECTION,
+        runContinuationWorker: true,
+        assertOutput: assertClaudeBackgroundSubagentAfterRootOutput,
+      },
+    ],
+  },
   {
     name: "claude_background_task_after_root",
     buildInput: claudeBackgroundTaskAfterRootInput,
@@ -224,6 +244,18 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./simple/opencode_transcript.ndjson", import.meta.url),
         modelSelection: OPENCODE_MODEL_SELECTION,
         assertOutput: assertSimpleOutput,
+      },
+    ],
+  },
+  {
+    name: "skill_invocation",
+    buildInput: skillInvocationInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("cursor"),
+        transcriptFile: new URL("./skill_invocation/cursor_transcript.ndjson", import.meta.url),
+        modelSelection: CURSOR_MODEL_SELECTION,
+        assertOutput: assertSkillInvocationCursorOutput,
       },
     ],
   },
