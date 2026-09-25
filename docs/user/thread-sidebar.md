@@ -108,6 +108,11 @@ prevent automatic settlement. An open pull request does not prevent inactivity
 settlement, but an old closed or merged pull request does not settle work you
 resumed after it closed.
 
+To keep one thread out of the settled shelf no matter how long it sits idle, open its menu,
+choose **Auto-settle behavior**, and pick **Disabled**. The current option is checked. Pick
+**Enabled** to return to the usual rules. Manual settle, snooze, and archive still work while it
+is disabled.
+
 Change these rules in **Settings → General** on web and desktop, or **Settings → Thread behavior** on mobile.
 They continue to run when your apps are closed. On web and desktop, choose an environment at the
 top to change only its rules, or **All environments** to update connected environments together.
@@ -160,6 +165,9 @@ snooze limit stops by default. Providers without a reset time offer manual
 retry and the normal snooze choices.
 
 On web and desktop, use **Agents** to follow work delegated to subagents.
+
+Subagent threads started by the agent can't take messages; message the parent
+thread instead.
 
 Expand a tool call in the conversation to see its full command and output.
 Summaries shorten shell wrappers and can still describe the latest call after it

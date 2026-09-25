@@ -82,6 +82,8 @@ export type OrchestratorV2ScenarioStep =
       readonly commandId: CommandId;
       readonly decision?: ProviderApprovalDecision;
       readonly answers?: ProviderUserInputAnswers;
+      /** Captures the shell snapshot under this key while the request is pending. */
+      readonly shellSnapshotKeyWhilePending?: string;
     };
 
 export interface OrchestratorV2Scenario {
@@ -122,6 +124,7 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
     case "thread.unsettle":
     case "thread.snooze":
     case "thread.unsnooze":
+    case "thread.auto-settle.set":
     case "thread.pin":
     case "thread.unpin":
     case "thread.pin.reorder":
@@ -555,6 +558,12 @@ export function runOrchestratorV2Scenario(
             break;
           case "respond_to_next_runtime_request": {
             const request = yield* waitForPendingRuntimeRequest(step.threadId);
+            if (step.shellSnapshotKeyWhilePending !== undefined) {
+              capturedShellSnapshots.set(
+                step.shellSnapshotKeyWhilePending,
+                yield* orchestrator.getShellSnapshot(),
+              );
+            }
             const result = yield* orchestrator.dispatch({
               type: "runtime-request.respond",
               commandId: step.commandId,

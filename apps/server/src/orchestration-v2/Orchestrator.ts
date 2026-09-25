@@ -9,6 +9,7 @@ import {
 import {
   type ChatAttachment,
   CommandId,
+  isProviderNativeSubagentThread,
   MessageId,
   type ModelSelection,
   OrchestrationV2Command,
@@ -155,6 +156,15 @@ export class OrchestratorProviderAdapterError extends Schema.TaggedError<Orchest
   }
 }
 
+export class OrchestratorSubagentThreadReadOnlyError extends Schema.TaggedError<OrchestratorSubagentThreadReadOnlyError>()(
+  "OrchestratorSubagentThreadReadOnlyError",
+  { commandId: CommandId, threadId: ThreadId },
+) {
+  override get message(): string {
+    return "This subagent is run by its provider and cannot take messages. Message the parent thread instead.";
+  }
+}
+
 export class OrchestratorCommandPreviouslyRejectedError extends Schema.TaggedError<OrchestratorCommandPreviouslyRejectedError>()(
   "OrchestratorCommandPreviouslyRejectedError",
   {
@@ -203,6 +213,7 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorProviderAdapterError,
   OrchestratorCommandPreviouslyRejectedError,
   OrchestratorCommandIdConflictError,
+  OrchestratorSubagentThreadReadOnlyError,
 ]);
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 
@@ -300,6 +311,7 @@ function commandThreadId(command: OrchestrationV2Command): ThreadId {
     case "thread.unsettle":
     case "thread.snooze":
     case "thread.unsnooze":
+    case "thread.auto-settle.set":
     case "thread.pin":
     case "thread.unpin":
     case "thread.pin.reorder":
@@ -2090,6 +2102,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.unsettle"
           | "thread.snooze"
           | "thread.unsnooze"
+          | "thread.auto-settle.set"
           | "thread.pin"
           | "thread.unpin"
           | "thread.pin.reorder"
@@ -2170,6 +2183,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         command.type === "thread.unsettle" ||
         command.type === "thread.snooze" ||
         command.type === "thread.unsnooze" ||
+        command.type === "thread.auto-settle.set" ||
         command.type === "thread.pin" ||
         command.type === "thread.unpin" ||
         command.type === "thread.pin.reorder" ||
@@ -2485,6 +2499,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             updatedAt: alreadyAwake ? thread.updatedAt : now,
           };
         }
+        case "thread.auto-settle.set": {
+          const unchanged = command.enabled === (thread.autoSettleDisabledAt == null);
+          return {
+            ...thread,
+            autoSettleDisabledAt: command.enabled ? null : (thread.autoSettleDisabledAt ?? now),
+            updatedAt: unchanged ? thread.updatedAt : now,
+          };
+        }
         case "thread.pin": {
           // Pinning is a promotion: it clears the parked states rather than
           // silently outranking them — an explicit settle is un-settled and a
@@ -2793,6 +2815,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return "thread.snoozed" as const;
         case "thread.unsnooze":
           return "thread.unsnoozed" as const;
+        case "thread.auto-settle.set":
+          return "thread.auto-settle-set" as const;
         case "thread.pin":
           return "thread.pinned" as const;
         case "thread.unpin":
@@ -8733,6 +8757,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.unsettle":
       case "thread.snooze":
       case "thread.unsnooze":
+      case "thread.auto-settle.set":
       case "thread.pin":
       case "thread.unpin":
       case "thread.pin.reorder":
@@ -8753,9 +8778,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "provider-session.detach":
         yield* dispatchProviderSessionDetach(command, events, effects);
         break;
-      case "message.dispatch":
+      case "message.dispatch": {
+        // The provider owns a native subagent's conversation, so a sent
+        // message has nowhere to go. Only sends are refused: answers to the
+        // subagent's own questions reuse dispatchMessage and must still land.
+        const thread = yield* projectionStore
+          .getThread(command.threadId)
+          .pipe(
+            Effect.mapError(
+              (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+            ),
+          );
+        if (isProviderNativeSubagentThread(thread)) {
+          return yield* new OrchestratorSubagentThreadReadOnlyError({
+            commandId: command.commandId,
+            threadId: command.threadId,
+          });
+        }
         yield* dispatchMessage(command, events, effects);
         break;
+      }
       case "notification.delivery.accept":
         yield* dispatchNotificationAccepted(command, events);
         break;
