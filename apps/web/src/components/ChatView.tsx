@@ -4040,13 +4040,10 @@ export default function ChatView(props: ChatViewProps) {
   // can measure whether its relocated controls fit. The visible chrome remains
   // content-driven: Git/environment context or controls that actually fit.
   // A provider-native subagent cannot take messages: a status bar replaces the
-  // composer and its strips. While the subagent asks for an approval or an
-  // answer, the composer that renders those stays below the bar, without the
-  // thread settings that belong to the provider.
+  // composer and its strips. Its approvals and questions are asked on the
+  // top-level parent thread.
   const showProviderSubagentBar = isProviderSubagent;
-  const providerSubagentNeedsResponse =
-    isProviderSubagent && (pendingApprovals.length > 0 || pendingUserInputs.length > 0);
-  const composerMounted = !showProviderSubagentBar || providerSubagentNeedsResponse;
+  const composerMounted = !showProviderSubagentBar;
   const providerSubagentModels = selectedProviderEntry?.models ?? EMPTY_PROVIDER_MODELS;
   const providerSubagentCatalogModel = providerSubagentModels.find(
     (model) => model.slug === activeThread?.modelSelection.model,
@@ -6397,6 +6394,7 @@ export default function ChatView(props: ChatViewProps) {
     activeWorktreePath,
     hasServerThread: isServerThread,
     draftThreadEnvMode: isLocalDraftThread ? draftThread?.envMode : undefined,
+    preparingWorktree: isPreparingWorktree,
   });
   const canOverrideServerThreadEnvMode = Boolean(
     isServerThread &&
@@ -10273,7 +10271,7 @@ export default function ChatView(props: ChatViewProps) {
         : undefined,
     onEnvironmentChange,
     onEnvModeChange,
-    ...(canOverrideServerThreadEnvMode ? { effectiveEnvModeOverride: envMode } : {}),
+    envMode,
     ...(canOverrideServerThreadEnvMode
       ? {
           activeThreadBranchOverride: activeThreadBranch,
@@ -10683,7 +10681,6 @@ export default function ChatView(props: ChatViewProps) {
                           ) : null}
                           {!composerMounted ? null : (
                             <ChatComposer
-                              hideThreadSettings={isProviderSubagent}
                               multipleModelSelections={multipleModelSelections}
                               supportsMultipleModels={
                                 serverConfig?.environment.capabilities.requiredWorktreeBootstrap ===
@@ -10888,9 +10885,7 @@ export default function ChatView(props: ChatViewProps) {
                                 onEnvModeChange={onEnvModeChange}
                                 startFromOrigin={startFromOrigin}
                                 onStartFromOriginChange={onStartFromOriginChange}
-                                {...(canOverrideServerThreadEnvMode
-                                  ? { effectiveEnvModeOverride: envMode }
-                                  : {})}
+                                envMode={envMode}
                                 {...(canOverrideServerThreadEnvMode
                                   ? {
                                       activeThreadBranchOverride: activeThreadBranch,

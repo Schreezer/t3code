@@ -363,6 +363,8 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   });
   const agentsSegment = resolveSubagentPillSegment(turnSubagents);
   const composerEditorRef = useRef<ComposerEditorHandle>(null);
+  // A provider-native subagent shows status instead of a composer.
+  const isProviderSubagent = isProviderNativeSubagentThread(props.selectedThread.source);
   // Entering edit mode from the queue sheet should land in a ready composer,
   // not require a second tap on a composer already holding the message.
   const editingRunId = props.queuedRunEdit?.runId ?? null;
@@ -747,10 +749,12 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     (model) => model.slug === props.selectedThread.modelSelection.model,
   );
   const workspaceContentWidth = useWorkspaceContentWidth();
+  // Clearing animated width can retain the unfolded width after Android resumes folded.
+  // Assign both layouts explicitly so the dock always follows its current parent.
   const composerWidthStyle = useAnimatedStyle(() =>
     isSplitLayout && workspaceContentWidth !== null
-      ? { width: workspaceContentWidth.value, right: undefined }
-      : { width: undefined, right: 0 },
+      ? { width: workspaceContentWidth.value }
+      : { width: "100%" },
   );
   const selectedInstanceId = props.selectedThread.modelSelection.instanceId;
   useStreamingHaptics(props.selectedThread.id, props.selectedThreadFeed);
@@ -1042,7 +1046,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               setupWorkingStartedAt={props.setupWorkingStartedAt}
               queuedMessages={props.queuedMessages}
               dispatchingMessageId={props.dispatchingMessageId}
-              onEditPendingMessage={handleEditPendingMessage}
+              // A native subagent has no composer to edit a pending message in;
+              // Cancel on the edit banner would discard it.
+              onEditPendingMessage={isProviderSubagent ? null : handleEditPendingMessage}
               contentPresentation={props.contentPresentation}
               agentLabel={agentLabel}
               threadTitle={props.selectedThread.title}
@@ -1091,7 +1097,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           <Animated.View
             layout={COMPOSER_LAYOUT_TRANSITION}
             pointerEvents="box-none"
-            style={[{ position: "absolute", bottom: 0, left: 0, right: 0 }, composerWidthStyle]}
+            style={[{ position: "absolute", bottom: 0, left: 0 }, composerWidthStyle]}
           >
             {/* No paddingTop here: the overlay's measured height becomes the
                 list's bottom inset, so any padding above the pill/composer
@@ -1230,7 +1236,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                     : undefined
                 }
               >
-                {isProviderNativeSubagentThread(props.selectedThread.source) ? (
+                {isProviderSubagent ? (
                   <View
                     className="self-center px-3 pt-1.5"
                     style={{
