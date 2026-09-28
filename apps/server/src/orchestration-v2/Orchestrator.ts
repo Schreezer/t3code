@@ -17,6 +17,8 @@ import {
   MessageId,
   type ModelSelection,
   OrchestrationV2Command,
+  type OrchestrationV2InternalCommand,
+  type OrchestrationV2ServerCommand,
   type OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
@@ -55,7 +57,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
-import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
+import * as ProjectStore from "./ProjectStore.ts";
 import {
   isCheckpointRestoreIsolated,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
@@ -65,6 +67,7 @@ import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.t
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "./Notification.ts";
+import { isRestartNoteSource } from "./RestartBackgroundNote.ts";
 import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
@@ -233,7 +236,7 @@ export interface OrchestratorV2DispatchResult {
 export interface OrchestratorV2Shape {
   readonly resumeQueuedRuns: Effect.Effect<number, OrchestratorV2Error>;
   readonly dispatch: (
-    command: OrchestrationV2Command,
+    command: OrchestrationV2ServerCommand,
   ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
   readonly getTimelinePage: (
     threadId: ThreadId,
@@ -310,7 +313,7 @@ function isNativeMaintenanceCommand(message: {
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
 
-function commandThreadId(command: OrchestrationV2Command): ThreadId {
+function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.create":
     case "thread.archive":
@@ -643,7 +646,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const eventSink = yield* EventSinkV2;
   const commandReceipts = yield* CommandReceiptStoreV2;
   const idAllocator = yield* IdAllocatorV2;
-  const projects = yield* ProjectionProjectRepository;
+  const projects = yield* ProjectStore.ProjectStoreV2;
   const projectionStore = yield* ProjectionStoreV2;
   const nextTurnItemOrdinal = (
     projection: Pick<OrchestrationV2ThreadProjection, "thread"> &
@@ -671,7 +674,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const threadDispatch = yield* ThreadCommandExecutor;
 
   const mapDispatchError =
-    (command: OrchestrationV2Command) =>
+    (command: OrchestrationV2ServerCommand) =>
     <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, OrchestratorDispatchError, R> =>
       effect.pipe(
         Effect.mapError(
@@ -731,7 +734,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
 
   const makeEvent = <Event extends OrchestrationV2DomainEvent>(
-    command: OrchestrationV2Command,
+    command: OrchestrationV2ServerCommand,
     event: Omit<Event, "id">,
   ) =>
     Effect.gen(function* () {
@@ -748,7 +751,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
 
   const emit =
-    (events: Ref.Ref<Array<OrchestrationV2DomainEvent>>, command: OrchestrationV2Command) =>
+    (events: Ref.Ref<Array<OrchestrationV2DomainEvent>>, command: OrchestrationV2ServerCommand) =>
     <Event extends OrchestrationV2DomainEvent>(event: Omit<Event, "id">) =>
       Effect.gen(function* () {
         const withId = yield* makeEvent(command, event);
@@ -2269,9 +2272,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     if (command.type === "thread.pull-request.sync") {
-      const project = yield* projects
-        .getById({ projectId: command.projectId })
-        .pipe(mapDispatchError(command));
+      const project = yield* projects.get(command.projectId).pipe(mapDispatchError(command));
       const currentSequence = yield* eventSink.latestSequence({ threadId: command.threadId }).pipe(
         Effect.mapError(
           (cause) =>
@@ -4126,7 +4127,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const source = projection.runs.find((run) => run.id === command.restartContinuationOfRunId);
         if (
           !source ||
-          source.status !== "cancelled" ||
+          (source.status !== "cancelled" &&
+            !isRestartNoteSource(source, projection.providerTurns)) ||
           projection.thread.archivedAt !== null ||
           projection.thread.deletedAt !== null ||
           projection.thread.providerInstanceId !== source.providerInstanceId ||
@@ -7949,18 +7951,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const now = yield* DateTime.now;
-      if (projection.thread.rollbackFailure != null) {
-        yield* emit(
-          events,
-          command,
-        )({
-          type: "thread.metadata-updated",
-          threadId: command.threadId,
-          providerInstanceId: projection.thread.providerInstanceId,
-          occurredAt: now,
-          payload: { ...projection.thread, rollbackFailure: null, updatedAt: now },
-        });
-      }
+      // This rollback becomes the only one whose failure the thread records.
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: command.threadId,
+        providerInstanceId: projection.thread.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          ...projection.thread,
+          rollbackRequestId: command.commandId,
+          rollbackFailure: null,
+          updatedAt: now,
+        },
+      });
       yield* emit(
         events,
         command,
@@ -7994,10 +8000,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   /**
    * Records a provider rollback that failed after every retry, so clients
-   * waiting on it stop and show the reason. A newer rollback clears it.
+   * waiting on it stop and show the reason. A newer rollback clears it, and a
+   * late failure from a rollback it superseded is rejected.
    */
   const dispatchCheckpointRollbackFail = (
-    command: Extract<OrchestrationV2Command, { readonly type: "checkpoint.rollback.fail" }>,
+    command: Extract<OrchestrationV2InternalCommand, { readonly type: "checkpoint.rollback.fail" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) =>
     Effect.gen(function* () {
@@ -8005,6 +8012,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .getThread(command.threadId)
         .pipe(mapDispatchError(command));
       if (thread.deletedAt !== null) return;
+      if (thread.rollbackRequestId !== command.requestId) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Rollback ${command.requestId} is no longer the thread's current rollback.`,
+        });
+      }
       const now = yield* DateTime.now;
       yield* emit(
         events,
@@ -8760,7 +8774,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
   });
 
-  const dispatchUnsupported = (command: OrchestrationV2Command) =>
+  const dispatchUnsupported = (command: OrchestrationV2ServerCommand) =>
     Effect.fail(
       new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -8769,7 +8783,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
   const dispatchOnce = Effect.fn("orchestrationV2.dispatch.once")(function* (
-    command: OrchestrationV2Command,
+    command: OrchestrationV2ServerCommand,
   ): Effect.fn.Return<
     {
       readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -9036,7 +9050,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   const dispatchWithReceiptEffect = Effect.fn("orchestrationV2.dispatch.withReceipt")(function* (
-    command: OrchestrationV2Command,
+    command: OrchestrationV2ServerCommand,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.command_id": command.commandId,
@@ -9195,7 +9209,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     } satisfies OrchestratorV2DispatchResult;
   });
 
-  const dispatchWithReceipt = (command: OrchestrationV2Command) =>
+  const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) =>
     threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
 
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
@@ -9444,7 +9458,7 @@ export const layer: Layer.Layer<
   | ContextHandoffServiceV2
   | EventSinkV2
   | IdAllocatorV2
-  | ProjectionProjectRepository
+  | ProjectStore.ProjectStoreV2
   | ProviderAdapterRegistryV2
   | ProviderSessionManagerV2
   | ProviderSwitchServiceV2
